@@ -1,0 +1,11 @@
+{
+  "name": "zebra-warships-example",
+  "private": true,
+  "type": "module",
+  "description": "The Zebra Warships: a 60 s animated short in three.js, rendered frame by frame",
+  "scripts": {
+    "frames": "node render.mjs index.html out/frames frames 0 90 400 900 1500",
+    "render": "node render.mjs index.html out/all range 0 1799 --mp4 out/zebra.mp4"
+  },
+  "devDependencies": { "playwright": "^1.48.0" }
+}

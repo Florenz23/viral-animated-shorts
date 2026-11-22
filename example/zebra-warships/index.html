@@ -1,0 +1,968 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Zebra Warships</title>
+<style>html,body{margin:0;background:#000}canvas{display:block}</style>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@800&display=block" rel="stylesheet">
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"}}</script>
+</head><body><script type="module">
+// The Zebra Warships. 720x1280, 30 fps, frames 0..1799 (frame 0 = audio 0 s, your vo/voice.mp3). window.__paint(f), window.__ready.
+// Query: ?f=N paint frame N on load · ?shot=ID force a shot (ids: 1 2 3 3i 4 5 6 6p 7 7i 8 9 10 11) · ?nocap=1 no captions · ?noblur=1 no sub-frame blur.
+import * as THREE from 'three';
+import { buildHarbour, buildSky, buildPlank, INK_SCALE, INK_FOG, PLACE } from './world.js';
+import { buildSea, buildOffice } from './places.js';
+import { buildLadder, buildDoor, buildTeaTable, buildModelBoat, buildArrow } from './props.js';
+import { buildDock, buildHarbourFleet, buildFactory, buildHullSplats, popScale } from './fleet.js';
+import { drawPainter, drawAdmiral, drawHand, poseAt, BOX } from './cast.js';
+import { buildSub, rigTarget, drawCaptain, captainPose, CAPBOX, CAPG, SHIP_V } from './stretch-D.js';
+const W = 720, H = 1280, NF = 1800, Q = new URLSearchParams(location.search), q = (k, d) => +(Q.get(k) ?? d);
+const R = new THREE.WebGLRenderer({ antialias: false, preserveDrawingBuffer: true }); R.setSize(W, H, false); R.setPixelRatio(1);
+R.shadowMap.enabled = true; R.shadowMap.type = THREE.PCFSoftShadowMap; document.body.appendChild(R.domElement);
+const S = new THREE.Scene(); S.fog = new THREE.Fog(0xcccccc, 10, 400);
+const sky = buildSky(); S.add(sky.mesh);
+// ---------- places (one world): H the harbour, O the office tower on its quay, S the open sea
+const HB = buildHarbour(); S.add(HB.group); HB.group.position.set(...PLACE.H);
+const OF = buildOffice(); S.add(OF.group); OF.group.position.set(...PLACE.O);
+const SEA = buildSea(); S.add(SEA.group); SEA.group.position.set(...PLACE.S);
+// the crane insert stands 90 m due east of where shot 3's camera ends (f178), facing it: the whip to it is a pure pan right
+SEA.IN.position.set(80.5, 0, -35); SEA.IN.rotation.y = -Math.PI / 2;
+const hero = HB.hero, plank = buildPlank(hero, .58, 1.5);
+const ladder = buildLadder(4.6); ladder.position.set(hero.X(.45), hero.deck(.45) + .1, -hero.half(.45) - .12); hero.group.add(ladder);
+const DK = buildDock(); S.add(DK.group); DK.group.position.set(...PLACE.D);
+const HF = buildHarbourFleet(null, { lane: 3 }); S.add(HF.group); HF.group.position.set(...PLACE.F);
+// office props for shots 7–9: the door in the x = +8 wall, the admiral's tea table, the model boat and its heading arrow
+const DOOR = buildDoor(); DOOR.group.position.set(7.9, 0, -6.5); OF.group.add(DOOR.group);
+// the tea stand: beside him, screen-right, the pot turned away
+const TEA = buildTeaTable(); TEA.group.position.set(-3.0, 0, -9.05); TEA.group.rotation.y = 2.4 + Math.PI / 2; OF.group.add(TEA.group);
+const BOAT = buildModelBoat(); S.add(BOAT.group); BOAT.group.visible = false;
+const ARROW = buildArrow(); S.add(ARROW); ARROW.visible = false;
+// the paint factory (shot 11) and the colour it leaves on the hero
+const FAC = buildFactory(); S.add(FAC.group); FAC.group.visible = false;
+const SPL = buildHullSplats(hero, FAC.texs);
+const T = v => OF.table.group.localToWorld(new THREE.Vector3(...v)), IL = v => SEA.IN.localToWorld(new THREE.Vector3(...v));   // map-table local → world
+const O = v => OF.group.localToWorld(new THREE.Vector3(...v)), SL = v => SEA.group.localToWorld(new THREE.Vector3(...v)), DL = v => DK.group.localToWorld(new THREE.Vector3(...v)), FL = v => HF.group.localToWorld(new THREE.Vector3(...v));
+S.updateMatrixWorld(true);
+
+// ---------- light: hemisphere (sky/ground colours = the cool shadow colour), one warm key, the office lamps. Set per shot.
+const amb = new THREE.HemisphereLight(0xffffff, 0xffffff, 1); S.add(amb);
+const key = new THREE.DirectionalLight(0xffffff, 1); key.castShadow = true; key.shadow.mapSize.set(2048, 2048); key.shadow.bias = -.0003; key.shadow.normalBias = .004; key.shadow.radius = 5; S.add(key); S.add(key.target);
+
+// ---------- characters: unlit drawings on cards; origin = feet. Upright cards turn to the camera; flat cards lie on a surface.
+const U = .5 / 190, KT = 3;
+// focus distances are view depths (the depth buffer's z), taken at the face, not the feet
+const fz = v => v.clone().sub(cam.position).dot(new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion)), headAt = (c, h = 1.35) => c.root.position.clone().add(new THREE.Vector3(0, h, 0));
+const BLOBM = (() => { const c = document.createElement('canvas'); c.width = c.height = 128; const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(34,20,24,.6)'); gr.addColorStop(.55, 'rgba(34,20,24,.55)'); gr.addColorStop(.8, 'rgba(34,20,24,.22)'); gr.addColorStop(1, 'rgba(34,20,24,0)'); g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return new THREE.MeshBasicMaterial({ map: t, transparent: true, depthWrite: false, fog: false, polygonOffset: true, polygonOffsetFactor: -4 }); })();
+function card(who, draw, box, pose = poseAt) {
+  const [x0, y0, x1, y1] = box, c = document.createElement('canvas'); c.width = (x1 - x0) * KT | 0; c.height = (y1 - y0) * KT | 0;
+  const g = c.getContext('2d'), t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  const mat = new THREE.MeshBasicMaterial({ map: t, alphaTest: .3, side: THREE.DoubleSide, fog: false });
+  mat.onBeforeCompile = sh => { sh.fragmentShader = sh.fragmentShader.replace('#include <dithering_fragment>', '#include <dithering_fragment>\n  gl_FragColor.a = .5;'); };   // card flag for the post pass
+  const m = new THREE.Mesh(new THREE.PlaneGeometry((x1 - x0) * U, (y1 - y0) * U), mat);
+  m.position.set((x0 + x1) / 2 * U, -(y0 + y1) / 2 * U, 0);
+  m.customDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, map: t, alphaTest: .3 }); m.castShadow = true;
+  // the lower legs cast no shadow: the cast shadow starts above the knees, so the legs read against the floor (the blob grounds the feet)
+  m.customDepthMaterial.onBeforeCompile = sh => { sh.fragmentShader = sh.fragmentShader.replace('#include <alphatest_fragment>', '#include <alphatest_fragment>\n  if (vMapUv.y < LEGCUT) discard;').replace('void main', 'const float LEGCUT = ' + (who === 'hand' ? 0 : (box[3] + 150) / (box[3] - box[1])).toFixed(4) + ';\nvoid main'); };
+  const root = new THREE.Group(); root.add(m); S.add(root); root.visible = false;
+  // a soft contact shadow under the feet
+  const blob = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), BLOBM); blob.rotation.x = -Math.PI / 2; blob.renderOrder = 2; blob.visible = false; S.add(blob);
+  return { root, m, who, last: null, blob,
+    paint(f) { const k = Math.round(f); if (k === this.last) return; this.last = k; g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, c.width, c.height); g.setTransform(KT, 0, 0, KT, -x0 * KT, -y0 * KT); draw(g, pose(who, k)); t.needsUpdate = true; },
+    at(p, s = 1, flat = false, bw = .46) { root.visible = true; root.position.copy(p); root.scale.setScalar(s);
+      blob.visible = !flat && bw > 0; if (blob.visible) { blob.position.set(p.x, p.y + .006, p.z); blob.scale.set(bw * .8 * s, bw * 2.2 * s, 1); }
+      if (flat) root.rotation.set(-Math.PI / 2, 0, -Math.PI / 2);   // drawing x → world +Z, drawing up → world +X
+      else root.rotation.set(0, Math.atan2(cam.position.x - p.x, cam.position.z - p.z), 0); } };
+}
+const PAINTER = card('painter', drawPainter, BOX.painter);
+const ADM = card('admiral', drawAdmiral, BOX.admiral), CHA = card('chorusA', drawAdmiral, BOX.admiral), CHB = card('chorusB', drawAdmiral, BOX.admiral);
+const HAND = card('hand', drawHand, BOX.hand);
+const CARDS = [PAINTER, ADM, CHA, CHB, HAND];
+// the contact blob is long along the view, so it reads under the feet from any side: turned to the camera just before each render
+S.onBeforeRender = (r, sc, c) => { for (const k of CARDS) { const b = k.blob; if (!b.visible) continue; b.rotation.z = Math.atan2(b.position.x - c.position.x, b.position.z - c.position.z); b.updateMatrixWorld(true); } };
+
+// ---------- the painter's own strokes on the grey hull: the real dazzle pattern, revealed brush stroke by brush stroke,
+// mapped with the hull's own UVs so it lines up exactly with the hull when it pops.
+const DT = [.585, .66], DY = [1.75, 4.0];
+const decal = (() => { const nx = 16, ny = 6, pos = [], uv = [], uv1 = [], idx = [];
+  for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) { const t = DT[0] + (DT[1] - DT[0]) * i / nx, y = DY[0] + (DY[1] - DY[0]) * j / ny; pos.push(hero.X(t), y, hero.half(t) + .015); uv.push(...hero.uvAt(t, y)); uv1.push(i / nx, j / ny); }
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const a = j * (nx + 1) + i; idx.push(a, a + 1, a + nx + 1, a + 1, a + nx + 2, a + nx + 1); }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3)); g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2)); g.setAttribute('uv1', new THREE.Float32BufferAttribute(uv1, 2)); g.setIndex(idx); g.computeVertexNormals();
+  const mc = document.createElement('canvas'); mc.width = mc.height = 512; const mt = new THREE.CanvasTexture(mc); mt.channel = 1;
+  const mat = new THREE.MeshToonMaterial({ gradientMap: hero.hull.material.gradientMap, map: hero.dzMap, alphaMap: mt, alphaTest: .5, polygonOffset: true, polygonOffsetFactor: -2 });
+  const m = new THREE.Mesh(g, mat); m.receiveShadow = true; hero.group.add(m);
+  // pr = progress of each stroke (0..1): a stroke grows from its top-left start to its bottom-right end as the brush comes down
+  m.userData.paint = pr => { const key = pr.join(); if (m.userData.n === key) return; m.userData.n = key; const x = mc.getContext('2d'); x.fillStyle = '#000'; x.fillRect(0, 0, 512, 512); x.strokeStyle = '#fff'; x.lineCap = 'round';
+    const st = [[[40, 60], [170, 420], 120], [[160, 40], [310, 440], 130], [[300, 30], [460, 420], 140]];   // mask px, y down = toward the waterline
+    pr.forEach((p, i) => { if (p <= 0) return; const [[ax, ay], [bx, by], w] = st[i]; x.lineWidth = w; x.beginPath(); x.moveTo(ax, ay); x.lineTo(ax + (bx - ax) * p, ay + (by - ay) * p); x.stroke();
+      if (p >= 1) for (let k = 0; k < 4; k++) { x.lineWidth = 10; x.beginPath(); const px = bx - 60 + k * 30; x.moveTo(px, by - 10); x.lineTo(px - 4, by + 30 + (k * 23) % 40); x.stroke(); } });   // drips once the stroke is done
+    mt.needsUpdate = true; };
+  return m; })();
+
+// ---------- camera: keys [frame, px,py,pz, lx,ly,lz, fov, shiftY, shiftX]. Level camera (ly = py) + lens shift (setViewOffset).
+const cam = new THREE.PerspectiveCamera(35, W / H, .05, 3000);
+const sst = t => t * t * t * (t * (t * 6 - 15) + 10);   // smootherstep
+const clamp01 = t => Math.min(1, Math.max(0, t)), ss = t => (t = clamp01(t), t * t * (3 - 2 * t));
+function camKey(s, f) { const k = s.cam; if (s.spline) return splineKey(k, f); if (f <= k[0][0]) return k[0].slice(); for (let i = 1; i < k.length; i++) if (f <= k[i][0]) { const t = (k[i][11] === 'lin' ? (x => x) : sst)((f - k[i - 1][0]) / (k[i][0] - k[i - 1][0])); const e = k[i][12]; return k[i].slice(0, 10).map((v, j) => k[i - 1][j] + (v - k[i - 1][j]) * (e && e[j] ? 1 - (1 - t) ** e[j] : t)); } return k[k.length - 1].slice(); }
+// Hermite through the keys with continuous velocity (Catmull-Rom tangents); zero velocity at the ends and next to a hold
+function splineKey(k, f) { if (f <= k[0][0]) return k[0].slice(0, 10); const n = k.length; if (f >= k[n - 1][0]) return k[n - 1].slice(0, 10);
+  const same = (a, b) => a.slice(1, 10).every((v, j) => v === b[j + 1]);
+  const tan = (i, j) => (i === 0 || i === n - 1 || same(k[i - 1], k[i]) || same(k[i], k[i + 1])) ? 0 : (k[i + 1][j] - k[i - 1][j]) / (k[i + 1][0] - k[i - 1][0]);
+  let i = 1; while (f > k[i][0]) i++; const a = k[i - 1], b = k[i], dt = b[0] - a[0], t = (f - a[0]) / dt, t2 = t * t, t3 = t2 * t;
+  return a.slice(0, 10).map((v, j) => j === 0 ? f : (2 * t3 - 3 * t2 + 1) * v + (t3 - 2 * t2 + t) * dt * tan(i - 1, j) + (-2 * t3 + 3 * t2) * b[j] + (t3 - t2) * dt * tan(i, j)); }
+const C = (r, g, b) => new THREE.Color().setRGB(r / 255, g / 255, b / 255, THREE.SRGBColorSpace);
+const kf = (keys, f) => { if (f <= keys[0][0]) return keys[0][1]; for (let i = 1; i < keys.length; i++) if (f <= keys[i][0]) { const t = sst((f - keys[i - 1][0]) / (keys[i][0] - keys[i - 1][0])); return keys[i - 1][1] + (keys[i][1] - keys[i - 1][1]) * t; } return keys[keys.length - 1][1]; };
+const kl = (keys, f) => { if (f <= keys[0][0]) return keys[0][1]; for (let i = 1; i < keys.length; i++) if (f <= keys[i][0]) { const t = (f - keys[i - 1][0]) / (keys[i][0] - keys[i - 1][0]); return keys[i - 1][1] + (keys[i][1] - keys[i - 1][1]) * t; } return keys[keys.length - 1][1]; };   // linear keys (sub-frame safe)
+// a camera key in a place's local coordinates → world
+const ck = (P, [f, px, py, pz, lx, ly, lz, ...r]) => { const a = P([px, py, pz]), b = P([lx, ly, lz]); return [f, a.x, a.y, a.z, b.x, b.y, b.z, ...r]; };
+
+// ---------- light sets (one per place/time). Colours sRGB; intensities in "multiplier x pi" (three r160 physical units). lamp = office lamps (cd).
+const VIG_IN = q('vig', .6), G10 = q('g10', .72), B10 = q('b10', 5.5), U10 = f => sst(clamp01((f - 775) / 10));   // interior vignette (edge/centre ~.82); shot 10 gain
+const LIGHT = {
+  Hfog: { skyH: C(196, 204, 222), skyZ: C(124, 140, 190), glow: C(236, 232, 222), glowK: .2, glowDir: [-.75, .08, -1],
+          hemiSky: C(200, 206, 236), hemiGnd: C(104, 112, 156), hemi: .82, key: C(255, 228, 196), keyI: .78, keyDir: [-30, 40, 25], lamp: 0 },
+  Sgrey: { skyH: C(196, 202, 216), skyZ: C(112, 132, 178), glow: C(255, 226, 192), glowK: .35, glowDir: [-.5, .1, -1],
+          hemiSky: C(192, 202, 232), hemiGnd: C(98, 108, 150), hemi: .82, key: C(255, 226, 190), keyI: .78, keyDir: [-30, 40, 25], lamp: 0 },
+  Oin:   { skyH: C(212, 208, 222), skyZ: C(122, 140, 192), glow: C(255, 218, 176), glowK: .45, glowDir: [.2, .1, 1],
+          hemiSky: C(186, 190, 228), hemiGnd: C(116, 98, 116), hemi: .7, key: C(255, 216, 168), keyI: .72, keyDir: [-4, 9, -7], lamp: 3 },
+  Omap:  { skyH: C(212, 208, 222), skyZ: C(122, 140, 192), glow: C(255, 218, 176), glowK: .45, glowDir: [.2, .1, 1],
+          hemiSky: C(140, 156, 222), hemiGnd: C(110, 92, 120), hemi: .3, key: C(255, 196, 136), keyI: .46, keyDir: [-4, 9, -7], lamp: 1.2 },   // an interior: dim cool fill, warm key
+  // shots 7–9: the office by day, brighter from the set lights (the window light and the lamps), not the grade
+  Oday:  { skyH: C(212, 208, 222), skyZ: C(122, 140, 192), glow: C(255, 218, 176), glowK: .45, glowDir: [.2, .1, 1],
+          hemiSky: C(178, 188, 242), hemiGnd: C(116, 110, 152), hemi: 1.4, key: C(255, 222, 178), keyI: 1.0, keyDir: [-4, 9, 7], lamp: 6 },
+  // shot 10: a clear blue day (the gold belongs to shot 11): blue zenith, cool key, cool ground bounce
+  Dday:  { skyH: C(150, 190, 240), skyZ: C(70, 128, 214), glow: C(255, 236, 210), glowK: .3, glowDir: [-.5, .3, -1],
+          hemiSky: C(120, 150, 230), hemiGnd: C(150, 132, 120), hemi: .7, key: C(255, 226, 184), keyI: 1.25, keyDir: [-30, 50, 30], lamp: 0 },
+  // [G] Fgold: warm at the horizon to a pale lilac overhead (was a flat orange card)
+  Fgold: { skyH: C(252, 200, 140), skyZ: C(q('skz', 206), q('skz', 206) - 4, q('skz', 206) + 18), glow: C(255, 188, 116), glowK: .85, glowDir: [-1, .1, -.35],
+          hemiSky: C(178, 160, 226), hemiGnd: C(120, 108, 176), hemi: 1.0, key: C(255, 194, 128), keyI: 1.1, keyDir: [-40, 20, 15], lamp: 0 },   // violet-blue fill: shadow sides never go black (P4)
+};
+
+// ---------- the shot table. Frames are word onsets (vo/zebra-v2.words.json x 30), except shots 7–11 (marked tm): their a/b, camera keys,
+// poses and props keep the OLD frame numbers (vo/zebra30.words.json) and are reached through the time map TM (new frame → old frame, below).
+// Their comments give the new frame first and the old one in brackets.
+// cam keys (above); focus: metres, or a function of the frame; blur: max CoC px; fog: [[frame, near, far, cardOpacity]];
+// grade: gain/sat/con/vig/warm (number or step table [[frame, value]]); shadow: [centre, half-size]; places: groups shown.
+const hide = () => { for (const c of CARDS) { c.root.visible = false; c.blob.visible = false; } plank.group.visible = false; decal.visible = false; ladder.visible = false; hero.group.position.z = 0; hero.group.rotation.y = 0; hero.group.scale.setScalar(1); SEA.target.setDazzle(false);
+  BOAT.group.visible = false; ARROW.visible = false; FAC.group.visible = false; SPL.set(-99, 0); HB.others.forEach(o => o.setDazzle(false)); TEA.mono.visible = false; TEA.setSplash(-1); DOOR.setOpen(0); OF.table.group.position.set(0, 0, -10.2); OF.table.group.rotation.y = 0; OF.table.wood.color.set(0x7a4b30); if (MAPM) MAPM.color.setScalar(1); OF.floorM.color.setScalar(1);
+  hero.group.userData.fore.scale.y = 1; hero.group.userData.rig.visible = true; INK_FOG.value = .62; };
+// ---- stretch blocks (one per builder: new cards, helpers) ----
+// [A] shot 1 + T12: a lookout on the bow of a tug in the foreground (stretch-A.js). The tug rides with the camera (it is the boat
+// we're on), bobbing; after he points (f24–30) it falls behind to port and he leaves frame-left before the travel speeds up.
+import { drawLookout, lookoutPose, BOX_LOOKOUT, buildTug, buildBowWave, drawGull, gullPose, BOX_GULL } from './stretch-A.js';
+const LKO = card('lookout', drawLookout, BOX_LOOKOUT, lookoutPose), TUG = buildTug(), BOWW = buildBowWave(hero);
+S.add(TUG.group);
+for (const o of [TUG.group, BOWW.group]) CARDS.push({ root: o, blob: { visible: false }, paint() {} });   // so hide() hides them
+const GULL = card('gull', drawGull, BOX_GULL, gullPose); CARDS.push(LKO, GULL);
+// tug vs camera, lateral m (− = port): from 26 it drifts off to port, slowly while he is in frame (he leaves by ~35 at ≤40 px/f), then the deck clears by 42; it never comes nearer the lens
+const A_LO = [[26, 0], [30, -.12], [34, -.55], [37, -1.2], [40, -3.2], [43, -7]], A_YAW = [[30, 0], [43, .2]];
+const aLo = f => { const k = A_LO, n = k.length; if (f <= k[0][0]) return 0; if (f >= k[n - 1][0]) return k[n - 1][1]; let i = 1; while (f > k[i][0]) i++;
+  const tg = j => j === 0 ? 0 : j === n - 1 ? (k[j][1] - k[j - 1][1]) / (k[j][0] - k[j - 1][0]) : (k[j + 1][1] - k[j - 1][1]) / (k[j + 1][0] - k[j - 1][0]);   // Hermite, at rest at 26
+  const a = k[i - 1], b = k[i], d = b[0] - a[0], t = (f - a[0]) / d, t2 = t * t, t3 = t2 * t; return (2 * t3 - 3 * t2 + 1) * a[1] + (t3 - 2 * t2 + t) * d * tg(i - 1) + (-2 * t3 + 3 * t2) * b[1] + (t3 - t2) * d * tg(i); };
+// shot 1's camera: the old keys from 44 on; before 44 one push from frame 0 that starts already moving (15 % ease-out cubic in a smootherstep)
+const A_CAM = [[0, 128, 3.4, 150, -9, 3.4, -2, 34, 120, 0], [44, 112, 3.3, 131, -4, 3.3, -5, 16, 100, 0], [53, 111.5, 3.3, 130.4, -4, 3.3, -5, 16, 100, 0]];
+function camA(f) { const t = clamp01(f / 44), u = .85 * sst(t) + .15 * (1 - (1 - t) ** 3); return A_CAM[0].map((v, j) => j === 0 ? f : v + (A_CAM[1][j] - v) * u); }
+function stageA(f) {
+  const fw = new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion); fw.y = 0; fw.normalize(); const rt = new THREE.Vector3(-fw.z, 0, fw.x);
+  const fo = 1.5 + 7 * ((Math.tan(17 * Math.PI / 180) / Math.tan(cam.fov * Math.PI / 360)) ** .7 - 1), lo = aLo(f), g = TUG.group, sw = Math.sin(f * .17 - 1.6);
+  g.position.copy(cam.position).addScaledVector(fw, fo).addScaledVector(rt, lo); g.position.y = .09 * sw - .03;
+  g.rotation.order = 'YZX'; g.rotation.set(.015 * Math.sin(f * .12 + 1), Math.atan2(-fw.z, fw.x) + kf(A_YAW, f), .02 * Math.sin(f * .17 - .7)); g.visible = true; g.updateMatrixWorld(true);
+  LKO.at(g.localToWorld(new THREE.Vector3(5.5, TUG.deck(.806) + .005, -.55)), 1, false, .36);
+  BOWW.group.visible = true; BOWW.set(f, 1 - f / 58);
+  // a gull crosses right to left above him, from frame 0 (camera-relative, so the push doesn't sweep it)
+  if (f < 30) GULL.at(cam.position.clone().addScaledVector(fw, 10).addScaledVector(rt, 1.5 - .16 * f).add(new THREE.Vector3(0, 1.25 + .015 * f + .08 * Math.sin(f * .75), 0)), 1.5, false, 0);
+}
+
+// [B] the open sea 114–206: a lifeboat of three sailors beside the periscope, jumpers off the cargo, a dock worker in 3i (stretch-B.js)
+import { drawPerson, BOXB, lifeboatPose, jumperPose, workerPose, buildLifeboat, buildQuay, seaH } from './stretch-B.js';
+import { buildSplash } from './props.js';
+import { outlineMat, toon as toonB, tex as texB } from './world.js';
+// shot 3's near water: a fine wavelet layer on the sea's own (swelling) mesh, so the foreground under the lifeboat is painted water, not an empty blur
+// (opaque, 2048 px a 10 m tile = 5 mm a texel: the sea's own 10 cm texels magnify into soft smears this close, which read as blur)
+const NEARW = (() => { const t = texB(2048, 2048, (g, W, H) => { g.fillStyle = '#55707f'; g.fillRect(0, 0, W, H); let sd = 11; const r = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+    for (let i = 0; i < q('nwn', 150); i++) { const x = r() * W, y = r() * H, l = 4 * (26 + r() * 50), light = r() < .6; g.strokeStyle = light ? 'rgba(176,204,224,.8)' : 'rgba(46,66,104,.55)'; g.lineWidth = 4 * (3 + r() * 2); g.lineCap = 'round';
+      for (const ox of [0, -W]) for (const oy of [0, -H, H]) { g.beginPath(); g.moveTo(x + ox, y + oy); g.quadraticCurveTo(x + ox + l / 2, y + oy - 20, x + ox + l, y + oy); g.stroke(); } } }, [q('nwr', 300), q('nwr', 300)]);
+  const m = new THREE.Mesh(SEA.water.mesh.geometry, toonB({ map: t, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })); m.receiveShadow = true; SEA.group.add(m); return { mesh: m, t }; })();
+const LB = buildLifeboat(); SEA.group.add(LB.group);
+const QY = buildQuay(); SEA.IN.add(QY.group);
+const SAIL = ['cap', 'capt', 'sou'].map(k => card(k, drawPerson, BOXB.person, lifeboatPose));
+const JMP = [0, 1, 2].map(i => card('jump' + i, drawPerson, BOXB.person, jumperPose)), JSP = JMP.map(() => { const s = buildSplash(); s.group.scale.setScalar(.22); SEA.group.add(s.group); return s; });
+const WK = card('worker', drawPerson, BOXB.person, workerPose);
+// the foam and splash spheres in this stretch carry a heavier ink (C9): their 1.6 px ink vanished under the depth blur (the far ones heavier still)
+for (const [sp, px] of [[SEA.splash, 5], ...JSP.map(s => [s, 3]), ...SEA.sinkers.map(k => [k.sp, 3])]) sp.group.traverse(o => { if (o.material && o.material.uniforms && o.material.uniforms.uPx) o.material = outlineMat(px); });
+const propB = o => ({ root: o, blob: { visible: false }, paint() {} });   // a prop hidden by hide() like a card
+CARDS.push(...SAIL, ...JMP, WK, propB(LB.group), propB(NEARW.mesh), propB(QY.group), ...JSP.map(s => propB(s.group)));
+// shot 3's camera rides the swell (a camera on the water): heave, pitch and roll, eased in out of the flash so f114 is unchanged
+const swell3 = f => { const k = ss((f - 114) / 10); return [k * .18 * Math.sin((f - 114) * .19), k * .036 * Math.sin((f - 114) * .19 - .9), k * .035 * Math.sin((f - 114) * .13)]; };   // heave m, pitch rad, roll
+// 3i rides the same swell (it is the same camera, panned): a key list plus heave, pitch (look height x distance) and roll
+const cam3i = (keys, f) => { const k = camKey({ cam: keys }, f), [dy, pa] = swell3(f), d = Math.hypot(k[4] - k[1], k[6] - k[3]); k[2] += dy; k[5] += dy + pa * d; return k; };
+const camX3 = f => { const x0 = peri(115); return x0 + .5 + (peri(f) - x0) * .95; };
+// the lifeboat's x: 3 m right of the camera's line, catching up into frame on "are" (129), sliding in to the middle once the periscope is under
+const boatX3 = f => camX3(f) + 6.2 - 3.1 * ss((f - 117) / 13) - q('o2', 1.8) * ss((f - q('o2f', 153)) / 16);
+const CARGO3 = [-16, -75];   // shot 3 only (P13): the cargo comes in from 120 m to about 70, so its rail and the jumpers read
+// the jumpers: cargo-local spot on the rail, jump frame; each flies out toward the camera and drops into the sea
+const JUMP = [[-8, 133], [6, 137], [-16, 141]], JV = [.4, .07, .16];   // vy (m/f), g (m/f²), outward (m/f)
+function stage3B(f) {
+  NEARW.mesh.visible = true; NEARW.t.offset.set(f * .0009 * 300 / 60 % 1, f * .0004 * 300 / 60 % 1);   // drifts with the sea's own wavelets
+  SEA.cargo.group.position.set(CARGO3[0], 0, CARGO3[1]); SEA.splash.group.position.set(CARGO3[0], 0, CARGO3[1] + 6);   // the splash on the near side, so the hull never cuts its ink
+  // the periscope ducks under as the cargo tips on "sinking" (131–141), at the left edge as the camera turns onto the lifeboat (never over its hull)
+  SEA.peri.group.position.y = -3.8 * ss((f - q('pd', 131)) / 10);
+  // the lifeboat runs alongside, 3 m right of the camera's line; it catches up into frame on "are" (129), and slides in to the middle as the periscope goes under
+  const g = LB.group; g.visible = true;
+  { const bx = boatX3(f), bz = q('lbz', .3), h = seaH(bx, bz, f), dx = (seaH(bx + 1.5, bz, f) - seaH(bx - 1.5, bz, f)) / 3, dz = (seaH(bx, bz + .8, f) - seaH(bx, bz - .8, f)) / 1.6;   // rides the swell
+    g.position.set(bx, h, bz); g.rotation.set(-Math.atan(dz) * .7 + .02 * Math.sin(f * .17), 0, Math.atan(dx) * .7); } g.updateMatrixWorld(true);
+  LB.update(f, f > 154 ? 1.8 : 1);
+  // all three inside the boat: the gunwale hides them from the vest down
+  SAIL.forEach((c, i) => { const x = [-1, 0, 1][i] * q('sx', 1.05), y = i === 1 ? -.38 : -.36; c.at(g.localToWorld(new THREE.Vector3(x, y, 0)), q('lbs', 1.35), false, 0); });
+  // the jumpers: on the rail (tipping with the ship) until their frame, then a ballistic arc; a splash where they land
+  SEA.cargo.group.updateMatrixWorld(true);
+  JUMP.forEach(([x, jf], i) => { const sp = JSP[i], [vy, gr, vo] = JV; let p;
+    if (f < jf) p = SEA.cargo.group.localToWorld(new THREE.Vector3(x, 4.25, 4.1));
+    else { const p0 = jumpFrom(x, jf), t = f - jf, y = p0.y + vy * t - gr * t * t / 2; if (y < 0) { const T = (vy + Math.sqrt(vy * vy + 2 * gr * p0.y)) / gr; sp.group.position.set(p0.x, 0, p0.z + vo * T).applyMatrix4(new THREE.Matrix4().copy(SEA.group.matrixWorld).invert()); sp.set((t - T) / 14); return; }
+      p = new THREE.Vector3(p0.x, y, p0.z + vo * t); }
+    JMP[i].at(p, 2.4, false, 0); });
+}
+window.__B = { LB, SAIL, JMP, WK };
+const CT3 = f => (f - q('ct0', 118)) / q('ctd', 26);   // [K r16: bow clear of the crew by 199] [K r15] the cargo's tip (old frames): it reads on "sinking" (old 134 = new 201), over the crew's heads
+const jumpFrom = (x, jf) => { const s = SEA.cargo, r = s.group.rotation.z, rx = s.group.rotation.x, py = s.group.position.y; SEA.sink(s, CT3(jf), true); s.group.updateMatrixWorld(true);
+  const p = s.group.localToWorld(new THREE.Vector3(x, 4.25, 4.1)); s.group.rotation.z = r; s.group.rotation.x = rx; s.group.position.y = py; s.group.updateMatrixWorld(true); return p; };
+// 3i: the quay in the right foreground, 15 m out along the insert camera's view, the worker on its left end
+QY.group.position.set(41.7, 0, 73.1); QY.group.rotation.y = .312;
+function stage3iB(f) { QY.group.visible = true; QY.group.updateMatrixWorld(true);
+  const hop = f >= 197 && f < 203 ? .45 * Math.sin(Math.PI * (f - 197) / 6) : 0;   // a hop of joy as the new ship lands
+  WK.at(QY.group.localToWorld(new THREE.Vector3(-2.9, QY.top + hop, 1.2)), q('wk3i', 1.85), false, .4); WK.blob.position.y -= hop; }   // [K r15] 1.85 (was 1.3): his face 5 %+
+
+// stretch C (258–373): the flag lieutenant tears the calendar page (5), the bearded admiral rakes tokens off the map (6) — stretch-C.js
+import { stretchC, CAM5 } from './stretch-C.js';
+// ---------- part 2 (new 990–1799): one stretch file per builder; namespace imports so nobody edits these lines
+import * as SM from './stretch-M.js';   // [M] 983–1154: good news / bad news / "wait, why?"
+
+import * as SN from './stretch-N.js';   // [N] 1155–1293: the ball thrown to a running friend
+
+import * as SP from './stretch-P.js';   // [P] 1294–1577: the torpedo aimed by eye, the miss
+
+import * as SQ from './stretch-Q.js';   // [Q] 1578–1799: nobody proved it; the painter in Paris
+
+const SC = stretchC({ S, OF, O, cam, card, CARDS, U });
+
+// -- stretch D (374–449): the grey ship under way in the scope (6p), then the U-boat captain at his periscope (6c, place U) --
+const SUB = buildSub(); S.add(SUB.group); SUB.group.position.set(4000, 0, 4000);   // place U, far from every other place
+const UL = v => SUB.group.localToWorld(new THREE.Vector3(...v));
+const SMOKE = rigTarget(SEA.target), TGT0 = SEA.target.group.position.clone(), HEAD6 = new THREE.Vector3(Math.cos(.5), 0, -Math.sin(.5));
+const shipPos = f => TGT0.clone().addScaledVector(HEAD6, SHIP_V * Math.max(0, f - 374));   // S-local; at rest where it was until the iris starts
+const CAPT = card('captain', drawCaptain, CAPBOX, captainPose); CARDS.push(CAPT);
+LIGHT.Sub = { skyH: C(60, 50, 60), skyZ: C(40, 40, 50), glow: C(255, 120, 90), glowK: 0, glowDir: [0, 1, 0],
+  hemiSky: C(96, 150, 140), hemiGnd: C(150, 70, 70), hemi: .42, key: C(255, 132, 100), keyI: .4, keyDir: [-3, 6, 4], lamp: 0 };   // red night light, green instrument fill
+// U and the ship's smoke render only in the shots that stage them (the flags are reset after every render)
+{ const o = S.onBeforeRender; S.onBeforeRender = (...a) => { SUB.group.visible = SUB.want; SMOKE.group.visible = SMOKE.want; if (!SMOKE.want) { SEA.target.group.position.set(TGT0.x, SEA.target.group.position.y, TGT0.z); SEA.target.group.rotation.z = 0; } SUB.want = SMOKE.want = false; o(...a); }; }
+function stage6p(f) { const p = shipPos(f); SEA.target.group.position.set(p.x, SEA.target.group.position.y, p.z); SMOKE.want = true; SMOKE.update(f);
+  SEA.target.group.rotation.z = q('pt6', .02) * Math.sin(f * .2 + .8); }   // r13: she pitches on the swell, so the held lock (403–411) is never a still frame
+function stage6c(f) { SUB.want = true; SUB.update(f); SUB.fold(Math.min(1.04, 1.04 * ss((f - 424) / 5)) - .04 * ss((f - 429) / 3)); SUB.group.updateMatrixWorld(true);
+  CAPT.at(UL([0, 0, 0]), 1, false, .5); CAPT.root.updateMatrixWorld(true);
+  // where the near grip falls on his card, seen from the camera: his hand is drawn there
+  const c = CAPT.root.worldToLocal(cam.position.clone()), g = CAPT.root.worldToLocal(SUB.gripWorld()), t = c.z / (c.z - g.z), hx = c.x + (g.x - c.x) * t, hy = c.y + (g.y - c.y) * t;
+  CAPG.grip = [hx / U - 8, -hy / U + 4]; }
+const HUNT = [[374, 18], [391, -4], [398, 1.5], [403, 0]];   // the crosshair hunts: overshoots, swings back, settles on the ship by 403, well before the lock (411)
+
+
+// [F] shot 10: the low camera (dock-local) and the painter's spot, 8 m in front of it and to the left (on the concrete, among the pails' row)
+// shot 10a: over the painter's shoulder at the hull. Camera A (dock-local), and the painter put on the ray through screen point (p10u, p10v)
+// at depth p10d, scaled so his feet stand on the basin floor (head centre = 1.35 m x scale)
+const C10 = [q('c10x', 15), q('c10y', 5.8), q('c10z', 41)], L10 = [q('l10x', 4), q('l10y', 6), q('l10z', 0)], F10 = q('f10', 40);
+const P10 = (() => { const c = new THREE.PerspectiveCamera(F10, W / H, .1, 100); c.position.set(...C10); c.lookAt(...L10); c.updateMatrixWorld(true);
+  const v = new THREE.Vector3(q('p10u', -.65), q('p10v', .07), .5).unproject(c).sub(c.position).normalize(), fw = new THREE.Vector3(0, 0, -1).applyQuaternion(c.quaternion);
+  // the depth at which his head (172 drawing units x scale) is p10h of the frame height
+  const at = d => c.position.clone().addScaledVector(v, d / v.dot(fw)), G10 = q('gr10', 4), hf = d => 172 * U * (at(d).y - G10) / 1.347 / (2 * d * Math.tan(F10 * Math.PI / 360));
+  let lo = .5, hi = 30; for (let i = 0; i < 40; i++) { const m = (lo + hi) / 2; if (hf(m) > q('p10h', .22)) lo = m; else hi = m; }
+  const p = at(lo); return { pos: [p.x, G10, p.z], s: (p.y - G10) / 1.347 }; })();
+const K10 = (() => { const A = [...C10, ...L10], fw = [L10[0] - C10[0], L10[2] - C10[2]], n = Math.hypot(...fw), rt = [-fw[1] / n, fw[0] / n], bk = [-fw[0] / n, -fw[1] / n];
+  const o = (r, b, u, lr) => [A[0] + rt[0] * r + bk[0] * b, A[1] + u, A[2] + rt[1] * r + bk[1] * b, A[3] + rt[0] * lr, A[4], A[5] + rt[1] * lr];
+  return { A: [...A, F10, 0, 0], A2: [...o(q('k10r2', -.1), q('k10b2', -.6), 0, 0), F10, 0, 0], B: [...o(q('k10r', 2.5), q('k10b', 2), q('k10u', .8), q('k10l', 2)), F10 + 2, 0, 0] }; })();
+// monotone cubic (Fritsch–Carlson) through camera keys, per component: C1, never overshoots a key (a Hermite spline sent the
+// camera under the floor between the shoulder and the wide), zero velocity at the first and last key
+function pchipKey(K, f) { const n = K.length; if (f <= K[0][0]) return K[0].slice(0, 10); if (f >= K[n - 1][0]) return K[n - 1].slice(0, 10);
+  let i = 1; while (f > K[i][0]) i++;
+  const tan = (k, j) => { if (k === 0 || k === n - 1) return 0; const d0 = (K[k][j] - K[k - 1][j]) / (K[k][0] - K[k - 1][0]), d1 = (K[k + 1][j] - K[k][j]) / (K[k + 1][0] - K[k][0]);
+    if (d0 * d1 <= 0) return 0; const w0 = 2 * (K[k + 1][0] - K[k][0]) + (K[k][0] - K[k - 1][0]), w1 = (K[k + 1][0] - K[k][0]) + 2 * (K[k][0] - K[k - 1][0]); return (w0 + w1) / (w0 / d0 + w1 / d1); };
+  const a = K[i - 1], b = K[i], dt = b[0] - a[0], t = (f - a[0]) / dt, t2 = t * t, t3 = t2 * t;
+  return a.slice(0, 10).map((v, j) => j === 0 ? f : (2 * t3 - 3 * t2 + 1) * v + (t3 - 2 * t2 + t) * dt * tan(i - 1, j) + (-2 * t3 + 3 * t2) * b[j] + (t3 - t2) * dt * tan(i, j)); }
+// a slow push and drift over his shoulder 748–771 (parallax on him, never a dead hold); then the move: sideways first (he leaves by the left edge ~776), back and up over the ten on "ten" (780), climbing on without a hold, the crane to the extreme wide (830)
+// 10b: the ten view (788–803) from behind the painter on the perch crane's cab roof (head over the lower-left edge), then the crane up (805–830)
+// the ten view: the camera is solved so his head sits at screen (pbu, pbv) at distance pbd, looking at (t10l*): he stays in the lower left
+const solve10 = (u, v, d, L, fov) => { const c = new THREE.PerspectiveCamera(fov, W / H, .1, 100), hd = new THREE.Vector3(P10.pos[0], P10.pos[1] + 1.347 * P10.s, P10.pos[2]); c.position.set(hd.x + 2, hd.y + 4, hd.z + 7);
+  for (let i = 0; i < 40; i++) { c.lookAt(...L); c.updateMatrixWorld(true); const r = new THREE.Vector3(u, v, .5).unproject(c).sub(c.position).normalize(); c.position.copy(hd).addScaledVector(r, -d); }
+  return [c.position.x, c.position.y, c.position.z, ...L, fov]; };
+// r15/r16: pbu -.6 / t10lx -10 (were -.5 / -20): the ten view turns down the row, so all ten centres are in frame on "ten" (702–706; was 4)
+const T10 = solve10(q('pbu', -.6), q('pbv', -.05), q('pbd', 7), [q('t10lx', -10), q('t10ly', 2), q('t10lz', -75)], q('t10f', 50));
+const fwd = (k, d, df) => { const a = new THREE.Vector3(k[0], k[1], k[2]), b = new THREE.Vector3(k[3], k[4], k[5]), u = b.clone().sub(a).normalize().multiplyScalar(d); return [a.x + u.x, a.y + u.y, a.z + u.z, b.x, b.y, b.z, k[6] + df]; };
+// the hundreds pop in rings outward from the ten: a ring every RG10 m, RF10 frames apart from 805, a small bump (PB10 of the ten's)
+// "ten" (new 702): the ten pop from old 783 on (was 780): the time map runs one speed from "one" to "hundreds", so the pull-back has no kink, and the pops move instead
+const TEN10 = 783;
+const RG10 = q('rg10', 46), RF10 = q('rf10', 2), PB10 = q('pb10', .3);
+DK.fleet.ships.forEach(s => { s.pf = 805 + Math.floor(s.d / RG10) * RF10; });
+const KC10 = q('kc', 801), KA10 = q("ka2", 767), KT10 = q("kt", 790), KW10 = q("kw", 846), TP = [...fwd(T10, q('tcr', .4), -2), 0, 0];
+// the crane up: back and up along the line through his head, so he stays in the lower left and shrinks, while the look drops onto the field
+const WK10 = [q('w10x', 90), q('w10y', 75), q('w10z', 100), q('w10lx', -10), q('w10ly', 0), q('w10lz', -90), q('w10f', 46), 0, 0];
+// time warp for the two big moves: constant speed through the middle (trapezoid velocity, ramps of trR), so the peak speed is
+// 1/(1-trR) of the mean instead of the smoothstep's 1.5x
+const trap = (t, r) => { t = clamp01(t); const v = 1 / (1 - r); return t < r ? v * t * t / (2 * r) : t > 1 - r ? 1 - v * (1 - t) * (1 - t) / (2 * r) : v * (t - r / 2); };
+// asymmetric: accelerate over a, decelerate over b (fractions of the move); the crane up spends its speed low, where the picture is sparse
+const trap2 = (t, a, b) => { t = clamp01(t); const v = 2 / (2 - a - b); return t < a ? v * t * t / (2 * a) : t > 1 - b ? 1 - v * (1 - t) * (1 - t) / (2 * b) : v * (t - a / 2); };
+const mixK = (a, b, u) => a.map((v, j) => j === 6 ? 2 * Math.atan(Math.tan(v * Math.PI / 360) * Math.pow(Math.tan(b[6] * Math.PI / 360) / Math.tan(v * Math.PI / 360), u)) * 180 / Math.PI : v + (b[j] - v) * u);
+// shot 10's camera (dock-local): the push over his shoulder (748–KA10), the pull-back to the ten (KA10–KT10) on a curve that goes sideways
+// first (he leaves by the left edge), the creep on the ten (KT10–803), the crane up over the hundreds (803–KW10)
+function cam10(f) { const r = q('trR', .3);
+  const A0 = KA10 > 748 ? K10.A2 : K10.A;
+  if (f <= KA10 && KA10 > 748) return [f, ...mixK(K10.A, K10.A2, sst(clamp01((f - 748) / (KA10 - 748))))];
+  if (f < KT10) { const u = trap((f - KA10) / (KT10 - KA10), q('trA', .42)), m = mixK(A0, [...T10, 0, 0], u), A = A0;
+    const sw = q('sw10', 0) * 4 * u * (1 - u), fx = A[3] - A[0], fz = A[5] - A[2], n = Math.hypot(fx, fz);   // the bow of the curve: out to the right of the straight line
+    m[0] += sw * -fz / n; m[2] += sw * fx / n;
+    return [f, ...m]; }
+  if (f <= KC10) return [f, ...mixK([...T10, 0, 0], TP, (f - KT10) / (KC10 - KT10))];
+  return [f, ...mixK(TP, WK10, trap2((f - KC10) / (KW10 - KC10), q('trWa', .3), q('trWb', .7)))]; }
+
+// 9b (r14): on the push down (eased over T9) the map paper under the model sits in the table's shade and the floor picks up the window light, so the paper doesn't burn the centre against dark corners (C5 .26, no card in frame)
+const MAPM = OF.table.group.children.find(o => o.geometry?.parameters?.width === 4.6)?.material, map9b = f => { const u = sst(clamp01((f - 723) / 14)); if (MAPM) MAPM.color.setScalar(1 - (1 - q('mp9b', .6)) * u); OF.floorM.color.setScalar(1 + (q('fm9b', 1.7) - 1) * u); };
+// the old-take bodies (frames of vo/zebra30, as in v17) that K's new shots replay through retime(); they are not in SH
+const K0 = [
+ // shot 3: the open sea. The periscope cuts the water (f115, out of the flash), a cargo ship tips over behind it on "sinking" (f134).
+ { id: '3', a: 114, b: 177, places: ['S'], light: 'Sgrey', ink: 1.3,
+   cam: f => { const x = peri(f), x0 = peri(115), u = sst(clamp01((f - 115) / 72)), m = ss((f - q('cw0', 122)) / q('cwl', 20)), [dy, pa] = swell3(f), bx = boatX3(f);   // [B] from the periscope's wake (old glide) to a two-shot on the lifeboat crew
+     const cx = camX3(f) + (bx + q('cx', 0) - camX3(f)) * m * q('cxm', 1), lx = x + 1.2 + (bx + q('lx', 0) - x - 1.2) * m;
+     return ck(SL, [f, cx, 1.15 + .25 * u + q('ch', .4) * m + dy * (1 - m) + q('hb', .8) * seaH(bx, q('lbz', .3), f) * m, (9.6 - 2.6 * u) * (1 - m) + (q('lbz', .3) + q('D', 6.9) - q('Dp', .5) * ss((f - 145) / 32)) * m, lx, 1.15 - q('cp', 2.9) * m + pa * 19.6 * (1 - q('pm', .4) * m), -10, 50, 40, 0]); },
+   up: f => [swell3(f)[2], 1, 0],
+   focus: f => 9.2 + (fz(headAt(SAIL[1], 1.6)) - 9.2) * ss((f - 120) / 12), blur: 5, nearCap: q('nc', 2.5), fog: [[115, 60, 720, 0]], shadow: [() => SL([peri(115) + 10, 0, -40]), 90],   // [B] racks from the periscope to the lifeboat as it comes in
+   grade: { gain: q('g3', .90), sat: 1.7, con: q('c3', 1.02), vig: q('v3', .35), warm: 1, toe: 1.5 },
+   stage(f) { SEA.peri.group.position.set(peri(f), 0, 0); SEA.sink(SEA.cargo, CT3(f), true); SEA.splash.set((f - 134) / 34); stage3B(f); } },
+ // shot 3 insert, "build" (f188): a dockside crane sets one shiny new ship down while two sink behind it
+ // whip, "build" (188): from the tipping ship along the water to the crane, landing as the new ship starts down
+ { id: '3i', a: 189, b: 206, places: ['S'], light: 'Sgrey', ink: 3, inkFog: 0,
+   cam: f => cam3i([ck(IL, [188, 42, 4, 90, 0, 4, -40, 44, 120, 0]), ck(IL, [213, 40, 3.8, 83.5, 6, 3.8, -40, 44, 120, 0])], f), up: f => [swell3(f)[2], 1, 0],   // [B] a push in on the worker, on the swell
+   focus: () => fz(headAt(WK, 1.75)), blur: q('b3i', 4.5), nearCap: q('nci', 2.5), fog: [[188, 50, 650, 0]], shadow: [() => IL([0, 0, -40]), 90],   // [B] on the dock worker
+   grade: { gain: q('g3i', .93), sat: 1.85, con: 1.3, vig: q('v3i', .9), warm: 1, toe: 2.3, st: q('st3i', .5) },
+   stage(f) { const t = ss((f - 188) / 10); SEA.hang(7 * (1 - t) - .02 * t, f); SEA.sinkers.forEach(({ s, sp }, i) => { SEA.sink(s, .3 + (f - 188) / 50 + i * .12); sp.set(.3 + (f - 188) / 30 - i * .2); });
+     SEA.sparks.forEach((m, i) => { const on = f >= 198 + i * 2, k = on ? Math.abs(Math.sin((f - 198 - i * 2) * .5)) : 0; m.visible = on; const g = SEA.fresh.group.position; m.position.set(g.x + m.userData.p[0], g.y + m.userData.p[1], g.z + 3); m.scale.setScalar(.6 + 2.2 * k); }); stage3iB(f); } },
+ // shot 4: the office. Three admirals at the window; outside, the painter dangles on a ladder over the dazzled hull. "lost" (f244): a finger twirls at the temple, the other two nod.
+ { id: '4', a: 207, b: 257, places: ['H', 'O'], light: 'Oin', ink: 1.6,
+   cam: [ck(O, [207, -.05, 1.35, -9.2, -.05, 1.35, 0, 44, 25, 0])],   // held: creep only   // head tops at ~.35 of the height
+   focus: () => fz(headAt(ADM)), blur: 7, fog: [[207, 90, 1100, 0]], shadow: [() => O([0, 0, -4]), 9],
+   grade: { gain: 1.2, sat: 1.1, con: 1.12, vig: q('v4', .5), warm: 1.8, vc: -.06, st: q('st4', 2), wc: q('wc4', 1) },
+   stage(f) { window4();
+     // the camera looks +Z, so +x is screen-left: the chorus left, the front admiral right
+     ADM.at(O([-.62, 0, -3.5])); CHA.at(O([.78, 0, -3.3])); CHB.at(O([.16, 0, -3.25])); } },
+ // shot 5: insert, the wall calendar beside the window. The flag lieutenant (peaked cap), on a step stool, tears the 1916 page off on "1917" (f276), sees 1917, crumples it, drops it.
+ // travel, "1917" (277): across the wall from the admirals to the calendar, arriving as the page flips
+ { id: '5', a: 269, b: 299, places: ['H', 'O'], light: 'Oin', ink: 1.8,
+   cam: [ck(O, [269, ...CAM5]), ck(O, [299, ...CAM5.slice(0, 6), 15.6, ...CAM5.slice(7)])],   // wide enough for the lieutenant on his stool; a slight push in on the hold (zoom only: T56 stays a pure pitch)
+   focus: () => fz(SC.headAt5()), blur: 6, fog: [[269, 90, 1100, 0]], shadow: [() => O([3.3, 1.5, -1]), 4],
+   grade: { gain: 1.25, sat: 1.15, con: 1.1, vig: VIG_IN, warm: 1.4, wc: 1, st: q('st5', 1.5) },
+   blurFrames: [276, 279],
+   stage(f) { window4(); SC.stage5(f); } },
+ // shot 6, "grey" (f384): cut to the periscope view. The grey ship steams across, smoke trailing; the crosshair hunts and finds it; on "fooling" (f411) it locks on and pings.
+ // iris, "grey" (384): the camera pushes down onto the sub token and the periscope circle opens out of it
+ { id: '6p', a: 387, b: 416, places: ['S'], light: 'Sgrey', ink: 1.2, peri: true, mblur: [0, .8], depth: 400, wmul: 3, creep: q('cr6p', .0018),
+   cam: f => { const g6 = f - 400, tx = kf(HUNT, f) - q('dr6', -1.4) * (g6 <= 0 ? 0 : g6 < 6 ? g6 * g6 / 12 : g6 - 3), bob = .07 * Math.sin(f * .13), t = shipPos(f), k = sst(clamp01((f - 380) / 8)) * (1 - (1 - q('rs6', .6)) * sst(clamp01((f - 396) / 8))), sw = .9 * Math.sin((f - 374) * .36) * k, sx = .4 * Math.sin((f - 374) * .23) * k;   // the scope pitches and yaws on the swell (~±16 / ±7 px), [K r16] the sway keeps 60 % and the ship drifts 1.4/f on through the lock (old 411 = new 316): 306–316 was 10 still frames
+     return ck(SL, [f, -470, 1.9 + bob, 40, t.x + tx + sx, 1.9 + bob + sw, t.z + 4, 11, 0, 0]); },
+   focus: 370, blur: .5, fog: [[384, 400, 4000, 0]], shadow: [() => SL([-500, 0, -330]), 60],
+   grade: { gain: 1.0, sat: 1.25, con: 1.15, vig: .35, warm: 1 },
+   stage(f) { stage6p(f); } },
+ // dissolve to U (412–418), the control room: the captain's eye is on the eyepiece; on "anyone" (420) he leans back, smug,
+ // and snaps the handles up (424–428). Brow pop at 436. A slow push in the whole time.
+ { id: '6c', a: 417, b: 449, places: [], light: 'Sub', ink: 1.5,
+   // out of the eyepiece: from a medium close-up on his eye at the cup, one gentle eased pull back and round to the medium shot as he leans back (414–442), then held (creep)
+   cam: f => { const u = sst(clamp01((f - 414) / 28)), L = [-.2 + .1 * u, 1.36 - .02 * u, 0];
+     return ck(UL, [f, .42 + .58 * u, 1.36 - .02 * u, 2.7 + .75 * u, ...L, 29 + 2 * u, 218 - 28 * u, -45 * (1 - u)]); },
+   up: f => { const r = .02 * Math.sin((f - 405) * .11); return [Math.sin(r), Math.cos(r), 0]; },   // the boat rolls: about ±1.1°
+   focus: () => fz(headAt(CAPT, 1.34)), blur: 9.5, fog: [[411, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4],
+   grade: { gain: 1.2, sat: 1.15, con: 1.1, vig: q('v6c', -.1), warm: 1, lift: q('l6c', 1), st: 1 }, fill: () => q('fl6c', 2),
+   stage(f) { stage6c(f); } },
+];
+// ---------- [K v18] the new opening (0–343) and the new end (815–989), written in NEW frames (vo/zebra-v2.words.json x 30).
+// A shot made for the old take keeps its body in K0 (old frames, as approved in v17) and plays through a piecewise-linear time map
+// new → old ([[newFrame, oldFrame], …], speed 1 past the ends): retime() wraps its camera, staging, look and kick; pf maps the card poses.
+const pwl = (K, f) => { const n = K.length; if (f <= K[0][0]) return K[0][1] + f - K[0][0]; if (f >= K[n - 1][0]) return K[n - 1][1] + f - K[n - 1][0];
+  let i = 1; while (f > K[i][0]) i++; const [a, x] = K[i - 1], [b, y] = K[i]; return x + (y - x) * (f - a) / (b - a); };
+const k0 = id => K0.find(s => s.id === id);
+function retime(o, a, b, map, over = {}) {
+  const m = f => pwl(map, f), inv = f => pwl(map.map(([n, x]) => [x, n]), f), W = v => typeof v === 'function' ? (f => v(m(f))) : v;
+  const s = { ...o, a, b, pf: f => m(f) };
+  s.cam = typeof o.cam === 'function' ? f => { const k = o.cam(m(f)); k[0] = f; return k; } : f => { const k = camKey(o, m(f)); k[0] = f; return k; };
+  for (const k of ['focus', 'blur', 'up', 'fill', 'lightMul', 'skyMul', 'stage']) if (typeof o[k] === 'function') s[k] = W(o[k]);
+  if (o.kick != null) s.kick = Math.round(inv(o.kick));
+  if (o.blurFrames) s.blurFrames = o.blurFrames.map(x => Math.round(inv(x)));
+  s.fog = o.fog.map(([k, ...r]) => [inv(k), ...r]); s.shadow = [W(o.shadow[0]), o.shadow[1]];
+  s.grade = Object.fromEntries(Object.entries(o.grade).map(([k, v]) => [k, Array.isArray(v) ? v.map(([x, y]) => [Math.round(inv(x)), y]) : W(v)]));
+  return Object.assign(s, over);
+}
+const M5 = [[127, 269], [171, 313]], M6C = [[312, 407], [327, 420], [343, 436]];   // shot 5: the page flips on "1917" (134 = old 276); 6c: "anyone" 327 = old 420
+// the window world (2, T24, 4, T45, 5): the hero at twice the size, turned so her painted side (plank, decal) faces the office window, 10 m out;
+// the painter on his plank at the same scale. Nothing is cheated between the opening and the window: it is one place.
+const HK = { x: q('hkx', 7.9), z: q('hkz', -44.5), s: 2 };
+const PW = new THREE.Vector3(HK.x - HK.s * plank.feet.x, HK.s * plank.feet.y, HK.z - HK.s * plank.feet.z);   // his feet (world)
+function windowK(dz) { const g = hero.group; g.position.x = HK.x; g.position.z = HK.z; g.rotation.y = Math.PI; g.scale.setScalar(HK.s); hero.setDazzle(dz); plank.group.visible = true; g.updateMatrixWorld(true);
+  PAINTER.at(g.localToWorld(plank.feet.clone()), HK.s, false, .36); }
+LIGHT.Hk = { ...LIGHT.Hfog, keyDir: [-30, 40, -25] };   // the fog morning, keyed from the office side (his side of the hull)
+// the painter's acting, new → old frames: the strokes a little slower (x.79), stroke one mid-way on "painted" (6), the pop on "zebra" (42), the laugh;
+// from 66 (small, behind the hats sweeping up through the frame) he is back at it, dangling and painting (old shot 4's acting, looped on its 56-frame swing)
+const P2 = [[0, 64], [42, 97], [60, 115]], KSW = 66;
+const painterW = f => (f = Math.round(f)) < KSW ? pwl(P2, f) : 207 + ((f - KSW) % 56 + 56) % 56;
+// the camera: shot 2 pushes in a little (0–46); T24 pulls back through the upper-left pane (z −62 at 54), over the hats (61), down onto them (77)
+const K2X = PW.x - .8;
+// [K r15] lower over the hats (4.45, they top out at 4.1) and down sooner and slower: the admirals come in from 63 and are sharp by 76
+const KCAM = [[46, K2X - .05, 5.55, -60.3, K2X - .05, 5.55, -40, 39, 0, 0], [54, .62, 5.15, -62, .62, 5.15, -40, 40, 0, 0], [61, .32, 4.45, -66, .32, 4.45, -40, 41, 6, 0], [69, .06, 3.3, -69.6, .06, 3.3, -40, 43, 18, 0], [77, -.05, 2.85, -71.2, -.05, 2.85, -62, 44, 25, 0]];
+const CAM2 = [[0, K2X, 5.6, -60.9, K2X, 5.6, -40, 40, 0, 0], KCAM[0]];
+// the window glass is skipped while the lens is within a metre of it (it would fill the frame for a frame)
+const GLASS = OF.group.children.find(o => o.geometry?.parameters?.width === 2.6 && o.geometry?.parameters?.height === 3.95);
+// [K r16] the office wallpaper is a perfectly regular stripe (comb ~1.0 on its own): on the pull-back it read as the "doubled" comb .10 at 67. Under T24's and shot 4's cameras it is drawn at
+// 45 % of its stripe contrast; it switches back inside the T45 whip (116). KW holds the camera position those two shots set; any other camera gets the normal paper.
+const WALLM = OF.group.children.find(o => o.geometry?.parameters?.width === 16.4 && o.geometry?.parameters?.height === 4.6)?.material, KW = new THREE.Vector3(1e9, 0, 0);
+const PAPER = WALLM?.map, PAPERK = PAPER && (() => { const i = PAPER.image, c = document.createElement('canvas'); c.width = i.width; c.height = i.height; const x = c.getContext('2d'); x.drawImage(i, 0, 0); x.globalAlpha = .55; x.fillStyle = '#5a7f68'; x.fillRect(0, 0, c.width, c.height);
+  const t = PAPER.clone(); t.source = new THREE.Source(c); t.needsUpdate = true; return t; })();   // own Source: in r160 clone() shares it, and t.image = c dimmed the paper in every office shot
+// [K r16] a measured gain table on T24: the frame luma runs one line from .69 (59) to .50 (71) instead of steps of −.06 as the hats sweep in
+const GK24 = [[55, 1], [56, 1], [57, .948], [58, .972], [59, .993], [60, 1], [61, .988], [62, .975], [63, .96], [64, .992], [65, 1.02], [66, .982], [67, .96], [68, 1.08], [69, 1.13], [70, 1.07], [71, 1.018], [72, 1]];
+const kwCam = k => (KW.set(k[1], k[2], k[3]), k);
+{ const o = S.onBeforeRender; S.onBeforeRender = (r, sc, c) => { if (WALLM && PAPERK) WALLM.map = c.position.distanceToSquared(KW) < 1e-10 ? PAPERK : PAPER; if (GLASS) { const p = GLASS.getWorldPosition(new THREE.Vector3()); GLASS.visible = Math.abs(c.position.z - p.z) > 1 || Math.abs(c.position.x - p.x) > 1.5; } o(r, sc, c); }; }
+// the end. E: the captain by his periscope (6c's place and framing): u = 1 is 6c's medium, 0 its close-up on the eye at the cup
+// [K r15] the camera is moving from the first frame (a steady drift in, 815–893), then the push to the eye (893–915), with no stop between
+const uE = f => { if (f < 893) return 1.3 - .3 * (f - 815) / 78; const t = clamp01((f - 893) / 22), t2 = t * t, t3 = t2 * t; return (2 * t3 - 3 * t2 + 1) + (t3 - 2 * t2 + t) * 22 * (-.3 / 78); };
+function camU(f, u) { const L = [-.2 + .1 * u, 1.36 - .02 * u, 0]; return ck(UL, [f, .42 + .58 * u, 1.36 - .02 * u, 2.7 + .75 * u, ...L, 29 + 2 * u, 218 - 28 * u, -45 * Math.max(0, 1 - u)]); }   // 6c's framing: 1 = medium, 0 = the eye at the cup
+const camE = f => { const k = camU(f, uE(f)); k[9] -= 150 * (1 - sst(clamp01((f - 819) / 30))); k[7] *= 1 - q('pE', .07) * sst(clamp01((f - 857) / 16));   // [K r17] a small push in between "submarine" and "captain" (857–873), held after
+  return k; };   // [K r15] he starts 150 px left of the admiral's spot (no hybrid face in the dissolve) and drifts to centre by 849
+function stageE(f) { SUB.want = true; SUB.update(f); SUB.P.position.y = -.6 * (1 - sst(clamp01((f - 882) / 10))); SUB.fold(1 - sst(clamp01((f - 887) / 6)));   // [K r15] it comes up from waist height on "raises" (883), his hand on the grip SUB.group.updateMatrixWorld(true);
+  CAPT.at(UL([0, 0, 0]), 1, false, .5); CAPT.root.updateMatrixWorld(true);
+  const c = CAPT.root.worldToLocal(cam.position.clone()), g = CAPT.root.worldToLocal(SUB.gripWorld()), t = c.z / (c.z - g.z);
+  CAPG.grip = [(c.x + (g.x - c.x) * t) / U - 8, -(c.y + (g.y - c.y) * t) / U + 4]; }
+// Ep: the striped ship under way (S-local), and the crosshair (m at the ship, ~17.7 px/m): it sweeps in (918–929), then hunts with reversals of
+// 40–80 px; two failed locks: on at 948 and slipping at 954, on at "sights" (969) and slipping at 975 (the stripes lie)
+const shipE = f => TGT0.clone().addScaledVector(HEAD6, SHIP_V * (f - 906));
+const AIMK = [[918, 20], [929, -3.6], [936, 3.0], [942, -2.2], [947, 0], [952, .2], [957, 4.2], [962, -4.0], [966, 1.8], [969, 0], [972, .2], [977, 4.4], [983, -3.2], [989, 1.5]];
+const AIM0 = q('aim0', 0), aimE = f => AIM0 + kf(AIMK, f), lockE = f => (f >= 948 && f < 954) || (f >= 969 && f < 975);
+const GE = { gain: q('gE', 1.2), sat: 1.15, con: 1.1, vig: q('vE', -.45), warm: 1, lift: q('l6c', 1), st: 1 };   // [K r15] U at the end: a lighter vignette than 6c's
+const SH = [
+ // ---------------- [K v18] new frames 0–343 and 815–989 (vo/zebra-v2) ----------------
+ // shot 2: open straight on the painter on his plank (the hero at twice the size, her painted side to the office window, so the pull-back
+ // can go through it). Mid-stroke on "painted" (6); the hull pops to dazzle on "zebra" (42), a kick, the laugh. A slow push the whole time.
+ { id: '2', a: 0, b: 46, places: ['H', 'O'], light: 'Hk', ink: 1.6, creep: 0, kick: 42, pf: (f, c) => c === PAINTER ? painterW(f) : f,
+   cam: CAM2,   // a slow push in (sst), at rest on 46: T24 starts from there
+   focus: () => fz(headAt(PAINTER, 2.7)), blur: q('b2', 10), fog: [[0, 8, 320, .1]], shadow: [() => PW.clone(), 14],
+   grade: { gain: f => q('g2a', .86) + (q('g2b', .97) - q('g2a', .86)) * sst(clamp01((f - 42) / 8)), sat: q('s2', 1.6), con: 1.25, vig: [[0, q('v2a', .45)], [42, q('v2b', .4)]], warm: 1, lift: .25, toe: 1, wc: 1 }, nearCap: 3,   // one grade through the pop; [K r15] darker, more saturated, a lighter vignette
+   stage(f) { f = Math.round(f); const o = pwl(P2, f); windowK(f >= 42); decal.visible = f < 42 && o >= 66; decal.userData.paint([(o - 65) / 7, (o - 79) / 7, (o - 92) / 5].map(clamp01)); } },
+ // pull-back, "and swore" (47–77): back from the painter, through the upper-left pane of the office window, over the admirals' hats and down
+ // onto them (shot 4's camera). One move, no turn: the look stays level on +Z; fov and lens shift ease to shot 4's.
+ { id: 'T24', travel: true, a: 47, b: 77, A: '2', B: '4', spline: true, creep: 0, gainK: GK24, lightMul: f => 1 - (1 - q('lm4', .92)) * sst(clamp01((f - 47) / 30)), cam: f => kwCam(camKey({ cam: KCAM, spline: true }, f)), mblur: [q('n24', 16), q('sh24', .05)], depth: 3, wmax: 48, pf: (f, c) => c === PAINTER ? painterW(f) : f + 147 },
+ // shot 4: the admirals at the window; through it, the painter on his plank, still at it. "navy" (97): a finger twirls at the temple (old "lost" 244).
+ retime(k0('4'), 78, 115, [[78, 225], [115, 262]], { nearCap: 3, lightMul: () => q('lm4', .92),   // [K r16] 59–110 down to ≤ .52 with the set lights (key and fill), not the grade
+   cam: f => kwCam([f, -.05, 2.85, -71.2 + .024 * (f - 77), -.05, 2.85, -62, 44, 25, 0]),   // [K r15] it keeps drifting in after the pull-back lands (no dead hold before "navy")
+   pf: (f, c) => c === PAINTER ? painterW(f) : f + 147, stage() { windowK(true); ADM.at(O([-.62, 0, -3.5])); CHA.at(O([.78, 0, -3.3])); CHB.at(O([.16, 0, -3.25])); } }),
+ // travel "You see" (116–126): across the wall to the calendar; the page flips on "1917" (134, old 276)
+ { id: 'T45', travel: true, a: 116, b: 126, A: '4', B: '5', paced: true, mblur: [0, 1], pf: (f, c) => c === PAINTER ? painterW(f) : f + 142 },
+ retime(k0('5'), 127, 171, M5, { grade: { ...k0('5').grade, vig: q('vig5', .4) },   // [K r16] vignette 111–170 ≤ .17
+   cam: f => { const o = pwl(M5, f), k = ck(O, [f, ...CAM5]); k[7] = 17.5 - 4.4 * clamp01((o - 269) / 44); k[5] += .1 * clamp01((o - 280) / 33); return k; },   // [K r15] one steady push in to the end (the old keys stopped at 299)
+   pf: (f, c) => c === PAINTER ? painterW(f) : f + 142, stage(f) { windowK(true); SC.stage5(pwl(M5, f)); } }),
+ // dissolve to S (172–179, "and German"): the periscope cuts the water on "submarines" (180), the cargo ship tips on "sinking" (201)
+ retime(k0('3'), 180, 257, [[172, 107], [180, 115], [201, 134], [257, 177]]),
+ { id: 'W3', travel: true, a: 258, b: 268, A: '3', B: '3i', mblur: [0, q('shW3', .7)], depth: 120, pf: f => Math.round(f) - 80, stage(f) { const r = Math.round(f); byId('3').stage(r); byId('3i').stage(r); } },   // [K r17] .7 shutter; the set (crew, boat, worker) holds each frame's state through its sub-frames, only the camera whips: their fast rowing bob stacked 3–4 head outlines at 261   // whip, "build" (268)
+ retime(k0('3i'), 269, 278, [[258, 178], [300, 220]]),
+ // iris, "Plain grey" (279–291): the scope circle opens out of the new grey ship the crane just set down, full on "grey" (289)
+ { id: '3x', iris: true, a: 279, b: 291, A: '3i', B: '6p', full: 289, irisC: () => window.__px(SEA.fresh.group.localToWorld(new THREE.Vector3(0, 3, 0))) },
+ // the grey ship in the scope: the crosshair hunts and finds her; on "fooling" (316) it locks on and pings. Dissolve to U 317–323.
+ retime(k0('6p'), 292, 321, [[279, 374], [330, 425]], { lock: f => f >= 316 ? [1, (f - 316) / 14] : [0, -1] }),
+ // the captain leans back on "anyone" (327) and snaps the handles up (331–335); dissolve into the office door 336–343 (shot 7 from 344)
+ retime(k0('6c'), 322, 343, M6C, { cam: f => camU(f, sst(clamp01((pwl(M6C, f) - 407) / 35))),   // [K r15] the pull-back is under way through the dissolve (no stall at 324)
+   stage(f) { SUB.P.position.y = 0; stage6c(pwl(M6C, f)); } }),
+ // ---- the end: dissolve from the harbour (F) to U (815–822). "Then one morning" (823): the captain by his periscope, a yawn on "morning";
+ // "raises" (883): the periscope comes up from waist height under his hand and the handles fold down; "periscope" (899): his eye to the cup, the camera pushes in on it.
+ { id: 'E', a: 823, b: 917, places: [], light: 'Sub', ink: 1.5, creep: 0, cam: f => camE(f),
+   up: f => { const r = .02 * Math.sin((f - 810) * .11); return [Math.sin(r), Math.cos(r), 0]; },
+   focus: () => fz(headAt(CAPT, 1.34)), blur: 9.5, fog: [[0, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4],
+   grade: GE, fill: () => q('fl6c', 2),
+   stage(f) { stageE(f); } },
+ // iris, "and finds" (918–930): the scope circle opens out of the eye cup; his face stays outside it while the room sinks to dark (13 f)
+ { id: 'Ex', iris: true, a: 918, b: 930, A: 'E', B: 'Ep', full: 930, koN: 13, irisC: () => window.__px(SUB.P.localToWorld(new THREE.Vector3(.43, 1.36, 0))) },
+ // the scope: the crosshair sweeps in and finds a STRIPED ship on "striped" (932); it can't settle on her. It lands her on "sights" (969):
+ // the brackets come on, and she slides off again (the stripes lie); the brackets flicker as it hunts, to the end.
+ { id: 'Ep', a: 931, b: 980, places: ['S'], light: 'Sgrey', ink: 1.2, peri: true, pr: q('prEp', 324), mblur: [0, q('shEp', .8)], depth: 400, wmul: 3, creep: q('crEp', .0018),
+   cam: f => { const t = shipE(f), bob = .07 * Math.sin(f * .13), sw = .5 * Math.sin((f - 900) * .36); return ck(SL, [f, -470, 1.9 + bob, 40, t.x + aimE(f), 1.9 + bob + sw, t.z + 4, 11, 0, 0]); },
+   focus: 370, blur: .5, fog: [[0, 400, 4000, 0]], shadow: [() => SL([-500, 0, -330]), 60],
+   grade: { gain: 1.0, sat: 1.25, con: 1.15, vig: .35, warm: 1 },
+   lock: f => [lockE(f) ? 1 : 0, -1],   // brackets snap on and off; no ping (L: a detuned tick at 948 and 969, a hiss at the slips 954 and 975)
+   stage(f) { const p = shipE(f); SEA.target.setDazzle(true); SEA.target.group.position.set(p.x, SEA.target.group.position.y, p.z); SMOKE.want = true; SMOKE.update(f); SEA.target.group.rotation.z = .02 * Math.sin(f * .2 + .8); } },
+ // the cut back to his frown (dissolve 976–980, held 981–989): he takes his eye off the cup, brows down; the film ends on his face
+ { id: 'Ef', a: 981, b: 989, places: [], light: 'Sub', ink: 1.5, creep: 0, cam: f => camU(f, .22 + .3 * sst(clamp01((f - 974) / 16))),
+   up: f => { const r = .02 * Math.sin((f - 810) * .11); return [Math.sin(r), Math.cos(r), 0]; },
+   focus: () => fz(headAt(CAPT, 1.34)), blur: 9.5, fog: [[0, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4], grade: GE, fill: () => q('fl6c', 2),
+   stage(f) { stageE(f); } },
+ // ---------------- shots 7–11 (new 344–822, old 442–898 through TM) ----------------
+ // shot 7: back in the office, a full shot of the door. On "walks" (new 362 [old 460]) the painter strides in, the model boat held high;
+ // the camera follows the boat to the table. On "zigzags" (460 [551]), a close insert on the model's stripes.
+ // a: 440 (was 450) so the time map can start it at new 344 (old 442); the creep still counts from 450
+ { id: '7', a: 440, b: 532, creepFrom: 450, places: ['O'], light: 'Oday', ink: 1.5,
+   // one continuous follow: the camera stands still and pans with the painter from the door to the table (the look rides a smoothed walk)
+   // r15: a slow push toward the door from old 420 (already moving through K's dissolve, 336–343), arriving as he walks in (460): no dead hold on the closed door
+   cam: f => { const w = sst(clamp01((f - 454) / 14)), [px, pz] = walkSmooth(f), L = [7.9 + (px - 7.9) * w, 1.3, -6.5 + (pz + 6.5) * w], pu = q('pu7', .5) * (1 - sst(clamp01((f - 420) / 40)));
+     return ck(O, [f, 3.6 - pu * .79, 1.4, -3.2 + pu * .61, ...L, 44, 60 * (1 - sst(clamp01((f - 500) / 32))), 0]); },   // the lens shift eases out over the follow (≈2 px/f), so the glide into 7i zooms about the frame centre
+   focus: f => f < 540 ? fz(headAt(PAINTER, 1.6)) : fz(BOAT.group.position), blur: 6, fog: [[450, 90, 1100, 0]], shadow: [() => O([4, 0, -7.5]), 7],
+   grade: { gain: f => 1 - .14 * sst(clamp01((f - 492) / 36)), sat: 1.0, con: q('k7', 1.42), vig: VIG_IN, warm: 2.2, st: 3.2 },
+   stage(f) { office(f); } },
+ // glide, "zigzags" (460 [551]): over the painter's shoulder down onto the model as he sets it on the table
+ { id: 'T7i', travel: true, a: 533, b: 551, A: '7', B: '7i', wmul: 3, aimFull: true, mblur: [0, 1], depth: 2.6,
+   aim: (f, p) => { const w = walkSmooth(f), u = ss((f - 533) / 8), b = O([w[0], 1.3, w[1]]).lerp(O([1.55, 1.3, -9.0]), u);
+     const pit = (a, c) => Math.atan2(c.y - a.y, Math.hypot(c.x - a.x, c.z - a.z)), w0 = walkSmooth(532);
+     const pA = pit(O([3.6, 1.4, -3.2]), O([w0[0], 1.3, w0[1]])), pB = pit(O([2.3, 1.16, -6.89]), O([1.55, 1.02, -9.0])), k = window.__pk ? window.__pk(f) : tw(byId('T7i'), f);
+     b.y = p.y + Math.hypot(b.x - p.x, b.z - p.z) * Math.tan(pA + (pB - pA) * k); return b; } },   // the pitch runs one way (start to end on the move's own curve), whatever the camera's height does   // the look runs from shot 7's (the painter) down to the model: the wall only rises; he leaves blurred   // the path bows back, away from the painter
+ { id: '7i', a: 552, b: 562, places: ['O'], light: 'Oday', ink: 1.2, creep: q('cr7i', .003),   // r13: a firmer creep, so the insert never sits still
+   cam: [ck(O, [551, 2.3, 1.16, -6.89, 1.55, 1.02, -9.0, 17, 0, 0])],   // on the line from shot 7's camera through the model: the glide is a push that keeps panning the same way   // from the left of the model, a long lens, well clear of the painter
+   focus: () => fz(BOAT.group.position), blur: q('b7i', 4), fog: [[551, 90, 1100, 0]], shadow: [() => O([1.55, .9, -9.0]), 2],
+   grade: { gain: .94, sat: 1.2, con: 1.0, vig: .55, warm: 2.2, st: 1, toe: .9, lift: .4 },
+   stage(f) { office(f); } },
+ // whip, "admiral" (485 [575]): off the model across the room to the admiral
+ { id: 'W78', travel: true, a: 563, b: 575, A: '7i', B: '8', mblur: [0, 1], depth: 4, wmul: 4, gainAt: [[569.5, q('w78w', 2.2), q('w78k', -.06)]] },   // r13: the sunlit table top sweeps through at 568–571; a dip in gain keeps it off the clip
+ // shot 8: the admiral, medium shot. "stares" (498 [586]): the monocle drops into his tea (he reacts at 584). "see" (569 [654]): a slow deadpan blink.
+ { id: '8', a: 576, b: 658, places: ['O'], light: 'Oday', ink: 1.5,
+   // from beside the model, turned to him. r15: a slow push and drift in on him; r17: broken on "goes" (607–619 old = new 521–533) by a quick
+   // push-in to a medium close-up as he draws himself up for his line, then the slow drift on (the 1 s windows never stay under 1.2 for over 1.8 s)
+   cam: (() => { const A = [.4, -7.4], P = (d, l) => [A[0] - d * .97, A[1] - d * .25 + l], k = (f, d, l, y, sy) => ck(O, [f, P(d, l)[0], y, P(d, l)[1], -3.45, 1.25 + (y - 1.3), -8.4, 37, sy, 0]);
+     const D = q('pu8b', 1.0);
+     return [k(576, 0, 0, 1.3, 100), k(607, .12, .1, 1.3, 100), k(619, .12 + D, .14, 1.36, q('sy8', 230)), k(658, .27 + D, .3, 1.36, q('sy8', 230))]; })(),
+   focus: () => fz(headAt(ADM)), blur: 4, fog: [[575, 90, 1100, 0]], shadow: [() => O([-3.4, 0, -8]), 4],
+   grade: { gain: 1.0, sat: 1.2, con: 1.12, vig: q('v8', .5), warm: 1 },   // r16: vignette .9 → .5 (C5 ≤ .17)
+   stage(f) { office(f); } },
+ // whip, "the painter" (585 [671]): from the admiral back across the room to the painter
+ { id: 'W89', travel: true, a: 659, b: 670, A: '8', B: '9', mblur: [0, 1], depth: 3, lightMul: f => 1 + (q('lm9', .6) - 1) * tw(byId('W89'), f) },   // r16: the lights dim into shot 9 along the whip
+ // shot 9: the painter close-up, grinning. "hide" (617 [701]): he shakes his head. On "lie" (661 [739]) he turns the model and the arrow above it swings the wrong way; a flip kick.
+ { id: '9', a: 671, b: 722, places: ['O'], light: 'Oday', ink: 1.4, lightMul: () => q('lm9', .6),   // r16: the set lights 40 % down on the close-up (brightness ≤ .52, P23)
+   cam: [ck(O, [665, 1.75, 1.27, -7.75, 3.1, 1.32, -10.4, 23, 120, 0])],
+   focus: f => f < 728 ? fz(headAt(PAINTER)) : fz(BOAT.group.position), blur: q('b9', 7), fog: [[665, 90, 1100, 0]], shadow: [() => O([2.5, 0, -10]), 3],
+   grade: { gain: .96, sat: 1.2, con: 1.0, vig: q('v9', 0), warm: 2.2, st: 2.2 },
+   stage(f) { office(f); } },
+ // the push down onto the model ("lie"): one eased pan-and-zoom from the same spot, landing on 657 [736]
+ { id: 'T9', travel: true, a: 723, b: 736, A: '9', B: '9b', lightMul: f => q('lm9', .6) + (1 - q('lm9', .6)) * tw(byId('T9'), f) },
+ { id: '9b', a: 737, b: 751, places: ['O'], light: 'Oday', ink: 1.4, kick: 739,
+   cam: [ck(O, [736, 1.75, 1.27, -7.75, 2.0, 1.0, -9.9, 31, 170, 0])],
+   focus: () => fz(BOAT.group.position), blur: q('b9b', 8), fog: [[665, 90, 1100, 0]], shadow: [() => O([2.5, 0, -10]), 3],
+   grade: { gain: q('g9b', .8), sat: 1.0, con: .9, vig: q('v9b', -.15), warm: 2.2, st: 2.2, toe: 1.2, lift: .3 },
+   stage(f) { office(f); map9b(f); } },
+ // shot 10: dissolve (669–676 [748–755]) to D, the dry dock. "one" (687 [767]): one hull pops striped. "ten" (702 [783]): a fast pull-back, ten pop in a row.
+ // "hundreds" (723 [805]): crane up to an extreme wide, hundreds popping in waves.
+ { id: '10', a: 752, b: 834, places: ['D'], light: 'Dday', ink: 1.3, mblur: [0, q('mb10', .9)], depth: 30, wmax: 60, freezeAt: f => f >= 795 && f < 809,   // r18: his trot off (old 797–806 = new ~714–722): staging frozen per frame, ≥ 16 samples, so the camera blur never shows two of him
+     // a long shutter: the pull-back and the crane up stay under 8 (motion metric)
+   // [F] opens over the painter's shoulder (he is in the lower left, turned to the hull; creep only to 771), then one continuous move:
+   // sideways first, so he leaves by the left edge (~776), back and up over the ten on "ten" (780), a slow climb on (no hold), and the
+   // crane up to the extreme wide on "hundreds" (805–830). Hermite spline: the move never stops between 771 and 830.
+   cam: f => ck(DL, cam10(f)),
+   focus: f => { const u = ss((f - q('fz10', 773)) / q('fzl10', 8)); return 1 / ((1 - u) / Math.max(.5, fz(headAt(PAINTER, 1.35 * P10.s))) + u / 400); }, blur: f => B10 - (B10 - 1.5) * ss((f - q('bz10', 781)) / q('bzl10', 9)), fog: [[748, 250, 3000, 0]], shadow: [f => DL([0, 0, -80]), 230],
+   // 10a (the shoulder) eases into 10b (the wide) as the camera pulls back, 775–785: a key on the hulls, blue shadow, the corners held down
+   grade: { gain: f => G10 + (q('g10b', .9) - G10) * U10(f), sat: f => 1.6 + (q('s10b', 1.35) - 1.6) * U10(f), con: q('k10', 1.18), vig: f => q('v10a', 1) + (q('v10b', 1.4) - q('v10a', 1)) * U10(f), warm: 1.3,
+     lift: f => q('l10a', 1.5) + (q('l10b', .6) - q('l10a', 1.5)) * U10(f), toe: 0, st: 2, vc: q('vc10', -.1) },
+   stage(f) { f = Math.round(f); if (f < 808) { const w = q('pw10', 1.6) * ss((f - 797) / 9), dx = T10[3] - T10[0], dz = T10[5] - T10[2], n = Math.hypot(dx, dz);   // on the head wall's edge; 797–806 he trots off to the left along it
+       PAINTER.at(DL([P10.pos[0] + w * dz / n, P10.pos[1], P10.pos[2] - w * dx / n]), P10.s, false, .46); }
+     DK.ships.forEach((s, i) => { const pf = i === 0 ? 767 : TEN10 - 1 + i; s.setDazzle(f >= pf); s.group.scale.setScalar(1 + q('pb0', .6) * (popScale(f, pf) - 1)); });
+     DK.sea.update(f); for (const s of DK.fleet.ships) { s.dz = f >= s.pf; s.s = 1 + PB10 * (popScale(f, s.pf) - 1); } DK.fleet.commit(); } },   // the hundreds wait grey in their basins; they pop striped in rings outward (805+)
+ // shot 11: dissolve (750–755 [831–836]) to F, the harbour a year later, golden, packed with striped ships ("year", 754 [835]). "4,000" (776 [856]): the crane down onto the launch.
+ // "ships" (802 [878]): he sweeps his arm over the fleet (806–817 [882–893]) and it comes back to rest on the last frame, 822 [898]. b runs on to 951 so the
+ // dissolve out of it (K's, ~823) keeps going at speed 1. 11i (the factory drop) is gone: its words are not in the new script.
+ // [G] a high wide drifting down (835), one crane down onto the launch behind the admiral (lands ~886); focus racks from the fleet to him as he comes up
+ { id: '11', a: 835, b: 951, places: ['H', 'F'], light: 'Fgold', ink: 1.35, creep: 0, lightMul: f => 1 + .25 * W11(f), skyMul: f => 1 - .04 * W11(f),
+   cam: f => camT(f), focus: f => foc11(f), blur: f => blur11(f), fog: [[831, 110, 1300, 0], [856, 110, 1300, 0], [878, 260, 2600, 0]], inkFog: .8, shadow: [[3, 0, 34], 110],
+   grade: g11(), stage(f) { harbourF(f); launch11(f); } },
+ // ================= part 2 (new 990–1799). Each builder replaces ONLY its own placeholder line(s) below. =================
+ // ---------- [M] 990–1154 ----------
+ // M1 (990–1006): out of his frown he brightens on "good news" and leans back into the eyepiece; the camera pushes to his eye at the cup (u .52 → 0)
+ { id: 'M1', a: 990, b: 1004, _m: SM.refs({ card, CARDS, S, SUB, UL, cam, U }), places: [], light: 'Sub', ink: 1.5, creep: 0, up: f => { const r = .02 * Math.sin((f - 810) * .11); return [Math.sin(r), Math.cos(r), 0]; }, focus: () => fz(headAt(SM.cap(), 1.34)), blur: 9.5, fog: [[0, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4], grade: GE, fill: () => q('fl6c', 2), cam: f => camU(f, .517 - (.517 - q('mcup', .14)) * sst(clamp01((f - 990) / 16))), stage(f) { SM.stageU(f); } },
+ // Mx (1005–1012): the scope circle opens out of the eye cup, as in part 1 (Ex)
+ { id: 'Mx', iris: true, a: 1005, b: 1012, A: 'M1', B: 'Mp', full: 1012, koN: 8, irisC: () => window.__px(SUB.P.localToWorld(new THREE.Vector3(.43, 1.36, 0))) },
+ // Mp (1013–1028): this time the crosshair settles dead centre on the striped ship, crisp; the brackets come on and HOLD on "perfectly" (1021), with a ping
+ { id: 'Mp', a: 1013, b: 1028, places: ['S'], light: 'Sgrey', ink: 1.2, peri: true, pr: q('prM', 324), depth: 400, wmul: 3, focus: 370, blur: .5, fog: [[0, 400, 4000, 0]], shadow: [() => SL([-500, 0, -330]), 60], grade: { gain: 1.0, sat: 1.25, con: 1.15, vig: .35, warm: 1 }, mblur: [0, .6], creep: .0012,
+   cam: f => { const t = shipE(f), bob = .07 * Math.sin(f * .13), sw = .5 * Math.sin((f - 900) * .36) * (1 - .85 * sst(clamp01((f - 1012) / 9))), aim = 5 * (1 - sst(clamp01((f - 1008) / 12))); return ck(SL, [f, -470, 1.9 + bob, 40, t.x + aim, 1.9 + bob + sw, t.z + 4, 11, 0, 0]); },
+   lock: f => f >= 1021 ? [1, (f - 1021) / 14] : [0, -1], stage(f) { const p = shipE(f); SEA.target.setDazzle(true); SEA.target.group.position.set(p.x, SEA.target.group.position.y, p.z); SMOKE.want = true; SMOKE.update(f); SEA.target.group.rotation.z = .02 * Math.sin(f * .2 + .8); } },
+ // M2 (1029–1089): back on him at the cup (dissolve 1024–1028); on "bad news" (1045) he comes off it and his face falls; "no idea" (1063–1082): eyes dart, then back to the cup
+ { id: 'M2', a: 1029, b: 1089, places: [], light: 'Sub', ink: 1.5, creep: 0, up: f => { const r = .02 * Math.sin((f - 810) * .11); return [Math.sin(r), Math.cos(r), 0]; }, focus: () => fz(headAt(SM.cap(), 1.34)), blur: 9.5, fog: [[0, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4], grade: GE, fill: () => q('fl6c', 2), cam: f => camU(f, kf([[1029, .22], [1036, .4], [1045, .42], [1056, .62], [1074, .52], [1089, q('mcup', .14)]], f)), stage(f) { SM.stageU(f); } },
+ // Mqx (1090–1096): the scope opens out of the cup again
+ { id: 'Mqx', iris: true, a: 1090, b: 1096, A: 'M2', B: 'Mq', full: 1096, koN: 7, irisC: () => window.__px(SUB.P.localToWorld(new THREE.Vector3(.43, 1.36, 0))) },
+ // Mq (1097–1112): two comic arrows over the ship flip on "which" (1094), "way" (1098), "going" (1107), always disagreeing; no brackets
+ { id: 'Mq', a: 1097, b: 1112, places: ['S'], light: 'Sgrey', ink: 1.2, peri: true, pr: q('prM', 324), depth: 400, wmul: 3, focus: 370, blur: .5, fog: [[0, 400, 4000, 0]], shadow: [() => SL([-500, 0, -330]), 60], grade: { gain: 1.0, sat: 1.25, con: 1.15, vig: .35, warm: 1 }, mblur: [0, .6], creep: .0012,
+   cam: f => { const t = shipE(f), bob = .07 * Math.sin(f * .13), sw = .25 * Math.sin((f - 900) * .36); return ck(SL, [f, -470, 1.9 + bob, 40, t.x + .6 * Math.sin((f - 1090) * .3), 1.9 + bob + sw, t.z + 4, 11, 0, 0]); },
+   lock: () => [0, -1], stage(f) { const p = shipE(f); SEA.target.setDazzle(true); SEA.target.group.position.set(p.x, SEA.target.group.position.y, p.z); SMOKE.want = true; SMOKE.update(f); SEA.target.group.rotation.z = .02 * Math.sin(f * .2 + .8); const w = SL([p.x, 0, p.z]), rt = new THREE.Vector3(1, 0, 0).applyQuaternion(cam.quaternion); SM.arrows(f, (dx, dy) => w.clone().addScaledVector(rt, dx).add(new THREE.Vector3(0, dy, 0))); } },
+ // M3 (1113–1154): his eyes dart left/right/left (dissolve 1108–1112); "Wait" (1120): a young crewman leans in beside him, head tilt and a "?" on "why" (1129); seam dissolve to N 1150–1157
+ { id: 'M3', a: 1113, b: 1154, places: [], light: 'Sub', ink: 1.5, creep: 0, up: f => { const r = .02 * Math.sin((f - 810) * .11); return [Math.sin(r), Math.cos(r), 0]; }, focus: () => fz(headAt(SM.cap(), 1.34)), blur: 9.5, fog: [[0, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4], grade: GE, fill: () => q('fl6c', 2), cam: f => { const w = sst(clamp01((f - 1112) / 10)), k = camU(f, .8 + q('mu3', .3) * w + .08 * sst(clamp01((f - 1124) / 30))); k[9] -= q('mx3', 150) * w; k[8] += q('my3', -140) * w; return k; }, stage(f) { SM.stageU(f); } },
+ // ---------- [N] 1155–1293 ----------
+ { id: 'N0', a: 1155, b: 1293, places: ['H'], light: 'Dday', ink: 1.4, creep: 0, lightMul: f => SN.lightMul(f), fill: f => SN.fill(f), skyMul: f => SN.skyMul(f), cam: f => SN.cam(f), focus: () => SN.focus(), blur: () => SN.blur(), nearCap: 1.6, fog: [[0, 140, 1500, 0]], shadow: [() => SN.shadowC(), 16], grade: SN.GRADE, stage(f) { SN.stage(f, { S, cam, card, CARDS, HB }); } },   // [N] the ball to a running friend, on the H quay by day (stretch-N.js)
+ // ---------- [P] 1294–1577 ----------
+ // stretch-P.js holds the props, the acting and the cameras; bind() only hands it the rig (nothing is built before the first P frame)
+ ...SP.bind({ S, cam, card, CARDS, U, UL, SL, ck, SEA, SUB, SMOKE, TGT0, HEAD6, camU, fz }),
+ // P0 (S), "Back then" (1294): low beside the sub's conning tower, the striped ship on the horizon ahead. "torpedo" (1314): it leaps from her bow
+ // in a burst of foam (a kick), dives, and its wake runs on toward the ship. Dissolve to U 1323–1330.
+ { id: 'P0', a: 1294, b: 1330, places: ['S'], light: 'Sgrey', ink: 1.3, creep: 0, kick: 1314, cam: f => SP.camLaunch(f), focus: () => SP.focLaunch(), blur: 2.2, nearCap: 2.5,
+   fog: [[0, 120, 1400, 0]], shadow: [f => SP.subAt(f), 40], grade: { gain: .84, sat: 2.0, con: 1.02, vig: .35, warm: 1, toe: 1.5 }, stage(f) { SP.stageLaunch(f); } },
+ // Pe (U): one push from the medium to his eye at the cup, landing on "eye" (1348): the free eye squeezes shut. It runs on under Pq as its outside.
+ { id: 'Pe', a: 1331, b: 1357, places: [], light: 'Sub', ink: 1.5, creep: 0, cam: f => SP.camEye(f), up: f => { const r = .02 * Math.sin((f - 810) * .11); return [Math.sin(r), Math.cos(r), 0]; },
+   focus: () => fz(SP.capHead()), blur: 9.5, fog: [[0, 40, 200, 0]], shadow: [() => UL([0, 0, -.6]), 4], grade: { ...GE, gain: f => 1.2 - .6 * SP.pip(f), vig: f => -.45 + .5 * SP.pip(f) }, fill: () => q('fl6c', 2), stage(f) { SP.stageEye(f); } },
+ // Pq: the iris out of the cup (1358–1368, as Ex), the full scope; from "way" (1389) the circle rises and his face comes up under it (the inset),
+ // to "direction" (1504); back to the full scope by 1511
+ { id: 'Pq', iris: true, a: 1358, b: 1511, A: 'Pe', B: 'Ps', full: 1368, irisC: () => window.__px(SUB.P.localToWorld(new THREE.Vector3(.43, 1.36, 0))), irisK: f => SP.irisK(f) },
+ // Ps (S): the scope view, Pq's inside (beats in stretch-P.js), on its own for the dissolve to the wide (1512–1519)
+ { id: 'Ps', a: 1512, b: 1519, places: ['S'], light: 'Sgrey', ink: 1.2, peri: true, mblur: [0, .7], depth: 400, wmul: 2, creep: .0018, cam: f => SP.camScope(f), focus: 370, blur: .5,
+   fog: [[0, 400, 4000, 0]], shadow: [f => SP.shipAt(f), 60], grade: { gain: 1.0, sat: 1.25, con: 1.15, vig: .35, warm: 1 }, stage(f) { SP.stageScope(f); } },
+ // Pw (S): the high wide over her stern quarter: the wake runs in to the ring astern, she steams on, the sailors at the rail watch and wave it past;
+ // it runs through the ring, astern, on "isn't" (1561). Dissolve to Q's office 1574–1581.
+ { id: 'Pw', a: 1520, b: 1577, places: ['S'], light: 'Sgrey', ink: 1.3, creep: 0, cam: f => SP.camWide(f), focus: () => SP.focWide(), blur: 3.5, nearCap: 2.5,
+   fog: [[0, 120, 1400, 0]], shadow: [f => SP.shipAt(f), 40], grade: { gain: .9, sat: 1.7, con: 1.02, vig: .35, warm: 1, toe: 1.5 }, stage(f) { SP.stageWide(f); } },
+ // ---------- [Q] 1578–1799 ----------
+ // [Q] Q0 (office): the admirals behind the map table look at each other on "work?" (1591), down at the map on "Honestly" (1611), shrug together on "nobody" (1623); the monocle drops on "proved" (1642)
+ { id: 'Q0', a: 1578, b: 1654, places: ['O'], light: 'Oday', ink: 1.5, creep: 0, spline: true,
+   cam: [ck(O, [1574, .42, 1.86, -6.35, .05, 1.32, -11.5, 38, 0, 0]), ck(O, [1611, .2, 1.8, -6.85, 0, 1.33, -11.5, 37, 0, 0]), ck(O, [1623, .05, 1.76, -7.2, 0, 1.35, -11.5, 35.5, 0, 0]), ck(O, [1658, -.18, 1.72, -7.55, -.05, 1.35, -11.5, 34.5, 0, 0])],
+   focus: () => fz(SQ.headQ0()), blur: 4, fog: [[1574, 90, 1100, 0]], shadow: [() => O([0, 0, -10.6]), 4],
+   lightMul: () => .55, grade: { gain: .9, sat: 1.4, con: 1.12, vig: f => 1.2 + .4 * Math.min(1, Math.max(0, (f - 1608) / 12)), warm: 1 },
+   stage(f) { SQ.stageQ0(f, { O, DOOR, card, CARDS }); } },
+ // [Q] Q1 (Paris): the painter at his easel turns to us on "famous" (1666), flourishes on "painter" (1677), points out at the city on "Paris" (1693) as the camera pulls back to show the tower,
+ // holds up the newspaper on "sure" (1708), shakes it on "thing" (1734), taps his stripes on "stripes" (1741, 1747, 1753), thumb to chest on "his" (1766), temple on "idea" (1772), winks on "first" (1783)
+ { id: 'Q1', a: 1655, b: 1799, places: ['Q'], light: 'Oday', ink: 1.5, creep: 0, spline: true,
+   cam: [ck(SQ.PL, [1651, -.7, 1.42, 2.55, .3, 1.12, -.3, 37, 0, 0]), ck(SQ.PL, [1667, -.5, 1.4, 2.25, .1, 1.16, -.2, 35, 0, 0]), ck(SQ.PL, [1680, -.4, 1.44, 2.6, -.1, 1.28, -.6, 36, 0, 0]),
+     ck(SQ.PL, [1694, -.2, 1.52, 3.6, -.45, 1.5, -1.5, 43, 0, 0]), ck(SQ.PL, [1702, -.22, 1.5, 3.5, -.45, 1.48, -1.5, 42, 0, 0]), ck(SQ.PL, [1714, -.35, 1.42, 3.0, -.3, 1.22, -.1, 37, 0, 0]),
+     ck(SQ.PL, [1734, -.3, 1.42, 2.85, -.27, 1.22, -.1, 36.5, 0, 0]), ck(SQ.PL, [1745, -.15, 1.4, 2.5, -.08, 1.18, 0, 36, 0, 0]), ck(SQ.PL, [1766, -.08, 1.4, 2.3, -.04, 1.2, 0, 34, 0, 0]), ck(SQ.PL, [1784, 0, 1.4, 2.1, 0, 1.24, 0, 31, 0, 0]), ck(SQ.PL, [1799, .03, 1.4, 2.0, 0, 1.245, 0, 30.5, 0, 0])],
+   focus: () => fz(SQ.headQ1()), blur: 4, fog: [[1651, 90, 1100, 0]], shadow: [() => SQ.PL([0, 0, -.6]), 4],
+   lightMul: () => .78, grade: { gain: .86, sat: 1.8, con: 1.1, vig: -.8, warm: 1.3 },
+   stage(f) { SQ.stageQ1(f, { S, PLACES, card, CARDS }); } },
+ // ================= end of part 2 =================
+];
+
+// shot 7: the painter's walk (office-local x, z) and the model boat: held high, then set on the table at (1.0, 0.92, -9.2)
+const LOOK = [[458, [8.4, -6.5]], [463, [7.4, -6.6]], [492, [5.0, -7.6]], [522, [2.9, -8.3]], [538, [2.0, -8.35]], [543, [2.0, -8.35]], [555, [3.6, -7.9]]];   // where the camera's look follows him (shot 7's pan, and T7i's aim)
+const WALK = [[458, [8.4, -6.5]], [463, [7.4, -6.6]], [492, [5.0, -7.6]], [522, [2.9, -8.3]], [532, [2.3375, -8.33125]], [547, [3.9, -8.6], 'ease']];   // the step off starts from rest (eased): a linear key at 535 reversed him in one frame (55 px at 533). His body: the same walk to the table, then at the set-down he steps off right along the table front, away from the lens and out of the glide
+function walkPos(f, W = WALK) { let p = W[0][1]; for (let i = 1; i < W.length; i++) if (f <= W[i][0]) { const [fa, a] = W[i - 1], [fb, b] = W[i], t = clamp01((f - fa) / (fb - fa)); return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; } else p = W[i][1]; return p; }
+function walkSmooth(f) { let x = 0, z = 0; for (let k = -8; k <= 8; k++) { const [a, b] = walkPos(f + k, LOOK); x += a; z += b; } return [x / 17, z / 17]; }
+function walk7(f) {
+  let p = WALK[0][1]; for (let i = 1; i < WALK.length; i++) if (f <= WALK[i][0]) { const [fa, a] = WALK[i - 1], [fb, b, e] = WALK[i], t = (e ? sst : x => x)(clamp01((f - fa) / (fb - fa))); p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; break; } else p = WALK[i][1];
+  if (f >= 458) { const bob = f >= 460 && f < 547 ? .03 * Math.abs(Math.sin((f - 460) * .52)) : 0; PAINTER.at(O([p[0], bob, p[1]])); }
+  BOAT.group.visible = f >= 458;
+  const hp = walkPos(f, LOOK), held = O([hp[0], 1.72, hp[1]]), d = cam.position.clone().sub(held); d.y = 0; d.normalize(); held.addScaledVector(d, .14);
+  const onT = O([1.55, .92, -9.0]), t = ss((f - 534) / 10);
+  BOAT.group.position.copy(held).lerp(onT, t);   // in his hands all the way down: no arc above them
+  const ry = Math.atan2(d.x, d.z); BOAT.group.rotation.set(0, ry * (1 - t), 0);
+}
+// shots 1–2: the hero glides in through the wide and comes to rest as the camera arrives at the painter (f65)
+function heroX(f) { const u = clamp01(f / 58); return -24 * Math.pow(1 - u, 2); }
+// shots 4–5: outside the window, the dazzled hero and the painter dangling on his ladder
+function window4() { hero.group.position.x = W4X; hero.group.position.z = -50; hero.setDazzle(true); ladder.visible = true; hero.group.updateMatrixWorld(true);
+  // on the ladder, his face framed in the upper-left window pane, clear of the mullions and the hats
+  const lp = ladder.localToWorld(new THREE.Vector3(.0, -1.7, -.25)); lp.y = W4Y; PAINTER.at(lp, W4S, false, 0); }
+const W4X = q('w4x', 3.6), W4S = q('w4s', 3.0), W4Y = q('w4y', 3.1);
+// shots 7–9: one office, one continuous staging. The painter comes in with the model; while the camera is on the admiral (f600)
+// he steps round the table, the model with him; the admiral and his tea are there the whole time.
+function office(f) {
+  DOOR.setOpen(Math.max(.07 * ss((f - 446) / 5), ss((f - 456) / 6))); ADM.at(O([-3.6, 0, -8.4]));   // r15: the door cracks open on 446–451 (new 348–353, the creak), then swings 456–462
+  if (f < 600) walk7(f);
+  else { PAINTER.at(O([3.1, 0, -10.4])); BOAT.group.visible = true; BOAT.group.position.copy(O([2.0, .92, -9.9]));
+    const turn = kf([[738, 0], [745, 1]], f); BOAT.group.rotation.set(0, .35 - .7 * turn, 0);
+    // the arrow swings from the bow round to the stern, overshooting
+    ARROW.visible = true; ARROW.position.copy(O([2.0, 1.36, -9.9])); { const t = f - 737.5; ARROW.material.rotation = t < 0 ? 0 : Math.PI - Math.PI * Math.exp(-.6 * t) * Math.cos(.9 * t); } }
+  ADM.root.updateMatrixWorld(true); const eye = ADM.root.localToWorld(new THREE.Vector3(15 * U, 517.2 * U, .03)), cup = TEA.group.localToWorld(TEA.cupTop.clone());
+  if (f >= 586 && f < 590) { const t = (f - 586) / 4;   // r18: thrown off from 586 (new 498, the plop), into the cup by 590
+    TEA.mono.visible = true; const p = eye.clone().lerp(cup, t); p.y = eye.y + (cup.y - eye.y) * t * t; TEA.group.worldToLocal(p); TEA.mono.position.copy(p); TEA.mono.rotation.set(t * 5, t * 3, 0); }
+  TEA.setSplash((f - 590) / 10);
+}
+// [G] shot 11 (old 835–898 = new 754–822, and on through K's dissolve out), one continuous camera. The harbour launch (the tug of shot 1) runs down a clear lane through the
+// packed fleet toward the hero at a launch's pace (.3 m/f ≈ 18 kn, easing off to .18 from 905: the push never stops), a bow wave and a V-wake behind her.
+// 835 "year": a high wide over the fleet, the hero, the quay and the roads packed to the horizon, drifting down; from ~845 one crane
+// down ("4,000" 856 mid-drop) onto the launch's wheelhouse roof behind the admiral, landed by ~886; the look settles on the hero.
+// The admiral rides in the bow: face ~11 % of frame height, right third, his hat top below the caption band (row 950+).
+const XT = q('t11x', 3);   // = the lane of buildHarbourFleet: the launch's lane (world x); she heads −z, bow toward the hero
+function tugZ(f) { let z = q('t11z0', 80) - .3 * (Math.min(f, 905) - 835); if (f > 905) { const t = f - 905; z -= .18 * t + 1.44 * (1 - Math.exp(-t / 12)); } return z; }
+// [G r14] the end frame is a medium on the launch's foredeck: the camera ~5.4 m aft of him at 3.5 m, level; a white rail across her foredeck
+// (1.4 m aft of him) fills the bottom ~15 %; his face above the caption band, the full tall hat up into the sky, the hero beyond her bow.
+const C11 = { S: [q('c11sx', -4), q('c11sy', 44), q('c11sz', 58)], E: [q('c11ex', -.62), q('c11ey', 3.49), q('c11ez', -.06)],
+  LS: [q('l11sx', 2), q('l11sy', 0), q('l11sz', 21)], LE: [q('l11ex', 2.38), q('l11ey', 3.49), q('l11ez', 0)] };
+const sw11 = f => Math.sin(f * .26);   // the swell under the launch, ~1.2 Hz
+function camT(f) {
+  const z = tugZ(f), u = sst(clamp01((f - q('c11a', 836)) / q('c11n', 32))), v = sst(clamp01((f - 836) / q('c11v', 48)));
+  // the crane: height comes down on u, the offset behind her closes late (w), so she and the admiral stay in the lower frame all the way down
+  const w = Math.pow(u, q('c11w', 1)), o = [0, 1, 2].map(i => C11.S[i] + (C11.E[i] - C11.S[i]) * (i === 1 ? u : w));
+  // r16: on the way down (old 840–864 = new 761–784) the camera sits well to port, so he is off the right edge while it descends; then it trucks to
+  // starboard (864–884 = new 784–807) and he enters from the right, the side the camera moves toward, at his own height (he never rises from the bottom edge)
+  const p = [XT + o[0] + .25 * (1 - sst(clamp01((f - 860) / 56))) - q('c11dx', 1.5) * sst(clamp01((f - 840) / 10)) * (1 - sst(clamp01((f - 864) / 20))), o[1] + .04 * sw11(f) * u, z + o[2]];   // after the landing the camera keeps drifting a step to port (to 916): the hero slides behind him
+  // the look: from down on the fleet and the roads to level on the hero
+  const L = [0, 1, 2].map(i => C11.LS[i] + (C11.LE[i] - C11.LS[i]) * v);
+  L[1] += .05 * sw11(f - 3) * u;
+  return [f, ...p, ...L, q('t11fov', 36) + (q('t11fov0', 44) - q('t11fov', 36)) * (1 - u), 0, 0];
+}
+// shot 11's look: the grade warms 884–900 into the end look; the high wide's toe is lifted so its dense ink keeps p2 ≥ .08
+// fog (in the table): the high wide hazes its far ranks (fog nearer, ink fogged harder), so the dense fleet ink keeps p2 ≥ .08; clears as we land
+function W11(f) { return sst(clamp01((f - 884) / 16)); }   // (declarations: the shot table above reads them)
+function gl11(a, b) { return f => a + (b - a) * W11(f); }
+function g11() { return { gain: gl11(.97, .88), sat: gl11(1.12, 1.08), con: gl11(.95, 1.0), vig: gl11(.9, q('v11b', 1.05)), warm: gl11(1, 1.6), st: gl11(0, 1.2), toe: gl11(1, .7),
+  lift: f => .2 + .25 * (1 - W11(f)) + .45 * (1 - ss((f - 858) / 10)), wc: f => sst(clamp01((f - 885) / 16)) }; }
+// focus: the fleet (90 m) in the high wide, racks to him as he comes up (862–880) and stays on him (the rack to the factory hit went with 11i)
+const foc11 = f => { const a = Math.max(.5, fz(headAt(ADM))), u = ss((f - 862) / 18); return 1 / ((1 - u) / 90 + u / a); };
+const blur11 = f => .6 + 4.3 * ss((f - 862) / 18);
+// the launch, her wake and the admiral in her bow (world-placed: she is the boat the camera stands on)
+const WAKE11 = (() => { const c = document.createElement('canvas'); c.width = 512; c.height = 1024; const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(44, 88), new THREE.MeshBasicMaterial({ map: t, transparent: true, alphaTest: .35, depthWrite: false, color: 0xf4f0e8, polygonOffset: true, polygonOffsetFactor: -2 }));
+  m.rotation.x = -Math.PI / 2; m.renderOrder = 1; const g = new THREE.Group(); g.add(m); S.add(g); g.visible = false;
+  // canvas: x across (44 m, 11.6 px/m), y down = astern (88 m, from 2 m ahead of the bow); the bow at y = 23 px
+  const PX = 512 / 44, by = 2 * PX;
+  return { group: g, set(f, dist) { const x = c.getContext('2d'); x.clearRect(0, 0, 512, 1024); x.lineCap = 'round'; x.strokeStyle = '#fff'; x.fillStyle = '#fff';
+    // bow wave: a white moustache curling off both sides of the stem
+    for (const s of [-1, 1]) { x.lineWidth = 9; x.beginPath(); x.moveTo(256, by + 4); x.quadraticCurveTo(256 + s * 30, by + 10 + 3 * Math.sin(f * 1.3), 256 + s * 52, by + 56); x.stroke();
+      x.lineWidth = 5; x.beginPath(); x.moveTo(256 + s * 14, by + 22); x.quadraticCurveTo(256 + s * 46, by + 40, 256 + s * 62, by + 92 + 4 * Math.sin(f * 1.1 + s)); x.stroke(); }
+    // the V: dashes fixed in the water, streaming astern along both arms (Kelvin ~19.5°), thinning and breaking up with distance
+    const r = rng => { let s = rng; return () => (s = (s * 16807) % 2147483647) / 2147483647; }, R = r(77);
+    for (let i = 0; i < 70; i++) { const s = i % 2 ? 1 : -1, d0 = R() * 80, d = ((d0 + dist) % 80), back = d * PX + by + 20, k = 1 - d / 80;
+      const half = .354 * d * PX + 20, jx = (R() - .5) * 10, len = 14 + 20 * k, a = Math.atan2(.354, 1) * s;
+      if (k < .08) continue; x.globalAlpha = 1; x.lineWidth = 2.5 + 5 * k * (.6 + R() * .6);
+      const cx = 256 + s * half + jx; x.beginPath(); x.moveTo(cx - Math.sin(a) * len * .5 - s * len * .4, back - Math.cos(a) * len * .5); x.lineTo(cx + Math.sin(a) * len * .5 + s * len * .4, back + Math.cos(a) * len * .5); x.stroke(); }
+    // the wash behind her stern (18 m astern of the bow): a churned band of short strokes, widening slowly
+    for (let i = 0; i < 46; i++) { const d0 = R() * 70, d = (d0 + dist * 1.0) % 70, back = (18 + d) * PX + by, k = 1 - d / 70, wdt = (2.2 + .08 * d) * PX;
+      const cx = 256 + (R() - .5) * 2 * wdt, len = 10 + 18 * k * R(); x.lineWidth = 2 + 5 * k; x.beginPath(); x.moveTo(cx, back); x.lineTo(cx + (R() - .5) * 8, back + len); x.stroke(); }
+    t.needsUpdate = true; } , m };
+})();
+CARDS.push({ root: WAKE11.group, blob: { visible: false }, paint() {} });
+import { put as putG, toon as toonG, tex as texG } from './world.js';
+// [G r14] a white rail across the launch's foredeck, 1.4 m aft of the admiral (tug-local; her own model has no bulwarks): a painted plate with a
+// wooden cap and a lifebuoy hung on it, so he reads as standing on her, not as a head pasted in a corner
+const RAIL11 = (() => { const g = new THREE.Group(); S.add(g); g.visible = false; const x = 4.1, y0 = TUG.deck(.728), h = .42;
+  putG(g, new THREE.BoxGeometry(.12, h, 5.0), toonG({ color: 0xe6dccb }), { pos: [x, y0 + h / 2, 0], outline: 2.2 });
+  putG(g, new THREE.BoxGeometry(.26, .09, 5.2), toonG({ color: 0x8a5a3a }), { pos: [x - .02, y0 + h + .04, 0], outline: 2 });
+  for (const zz of [-2.3, -.8, .8, 2.3]) putG(g, new THREE.BoxGeometry(.16, h, .1), toonG({ color: 0xcfc4b0 }), { pos: [x - .07, y0 + h / 2, zz], outline: 1.6 });
+  const bt = texG(128, 32, (c, W, H) => { for (let i = 0; i < 8; i++) { c.fillStyle = i % 2 ? '#f2ece0' : '#d8573c'; c.fillRect(i * W / 8, 0, W / 8, H); } });
+  putG(g, new THREE.TorusGeometry(.2, .06, 10, 24), toonG({ map: bt }), { pos: [x - .14, y0 + .24, -1.9], rot: [0, Math.PI / 2, 0], outline: 1.8, edges: false });
+  return { group: g }; })();
+CARDS.push({ root: RAIL11.group, blob: { visible: false }, paint() {} });
+let ADM11 = null;   // where the admiral stands (world), for the focus
+function launch11(f) {
+  const z = tugZ(f), g = TUG.group, hv = .05 * sw11(f);
+  g.position.set(XT, hv - .03, z); g.rotation.order = 'YZX'; g.rotation.set(.004 * Math.sin(f * .12 + 1), Math.PI / 2, .0006 * sw11(f - 6)); g.visible = true; g.updateMatrixWorld(true);   // the camera stands on her too: only a trace of pitch shows
+  // the wake: tug-local, bow at local x = +9, heading −z; the plane's top edge 2 m ahead of the bow
+  WAKE11.group.visible = true; WAKE11.group.position.set(XT, .04, z - 9 - 2 + 44); WAKE11.set(f, 86 - z);
+  // the admiral: in her bow (local x 5.5), a step to port of the centre line so he sits in the camera's right third; he rides the swell
+  // (knees: ±3 px at ~1.2 Hz on top of the launch's heave)
+  const p = g.localToWorld(new THREE.Vector3(5.5, TUG.deck(.806) + .005, q('a11lat', 0))); p.y += .009 * sw11(f + 2);
+  ADM.at(p, 1, false, .5); ADM11 = p;
+  RAIL11.group.visible = true; RAIL11.group.position.copy(g.position); RAIL11.group.quaternion.copy(g.quaternion);
+}
+// shot 11: the harbour a year later — every ship dazzled, the fleet out, the hero striped
+function harbourF(f) { hero.group.position.x = 0; hero.setDazzle(true); HB.others.forEach(o => o.setDazzle(true)); HF.update(f); }
+function peri(f) { return -36 + 40 * (f - 115) / 92; }   // shot 3: the periscope's x in S (it runs toward +X)
+// the map play: token i is pushed west (−z) off the table edge, then falls to the floor; the hand's fingertip rides behind it
+const PUSH = [{ i: 0, a: 315, b: 323, fall: 323 }, { i: 1, a: 354, b: 362, fall: 362 }];   // each token drops on its word: 'week' 320, 'down' 359
+// table-local; a tight frame on the pushes and the west edge; held (creep only), re-centred on the sub token 362–374, then the push down onto it
+const MAPCAM = [[315, -.35, 4.25, -.4, -.35, 0, -.4, 41, 0, 0], [362, -.35, 4.25, -.4, -.35, 0, -.4, 41, 0, 0], [374, -.4, 4.25, -.25, -.4, 0, -.25, 41, 0, 0], [384, -.4, 1.4, -.25, -.4, 0, -.25, 24, 80, 0]];
+function mapPlay(f) {
+  const top = OF.table.top; let tip = null;
+  for (const t of OF.tokens) { t.position.copy(t.userData.p0); t.rotation.set(0, t.userData.r0, 0); t.visible = true; }
+  for (const p of PUSH) { const tk = OF.tokens[p.i], z0 = tk.userData.p0.z, u = clamp01((f - p.a) / (p.b - p.a)), z = z0 + (-1.47 - z0) * (u * u * (3 - 2 * u));
+    if (f >= p.a) { tk.position.z = z; if (f < p.b - 2) tip = [tk.position.x, z + .1]; }
+    if (f > p.fall) { const v = clamp01((f - p.fall) / 7); tk.position.y = top - (top) * v * v; tk.position.z = -1.47 - .25 * v; tk.rotation.x = -2.2 * v; tk.rotation.z = 1.1 * v; } }
+  // hand path between pushes (fingertip in table coords)
+  const path = [[309, [-.55, -.6]], [315, [-.55, -.67]], [321, [-.55, -1.25]], [328, [-.5, -1.2]], [345, [-.25, -.4]], [354, [-.25, -.51]], [360, [-.25, -1.25]], [366, [-.2, -1.2]], [383, [.1, .6]]];
+  let hp = path[path.length - 1][1]; for (let i = 1; i < path.length; i++) if (f <= path[i][0]) { const [fa, a] = path[i - 1], [fb, b] = path[i], t = ss((f - fa) / (fb - fa)); hp = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]; break; }
+  const s = .3, lift = (f > 323 && f < 351) || f > 364 ? .05 : 0;
+  // drawing (0,0) sits 160 units behind the fingertip along +z and 31 units toward +x
+  HAND.at(T([hp[0] - 31 * U * s, top + .1 + lift, hp[1] + 160 * U * s]), s, true); HAND.root.quaternion.premultiply(OF.table.group.quaternion);   // flat in the table's frame
+}
+// cross-place transitions and the white flash
+const XF = [{ a: 172, b: 179, from: '5', to: '3' }, { a: 317, b: 323, from: '6p', to: '6c' }, { a: 336, b: 343, from: '6c', to: '7' }, { a: 819, b: 822, from: '11', to: 'E' }, { a: 976, b: 980, from: 'Ep', to: 'Ef' }];   // 6–8 frame dissolves between places   // dissolve S → O over "and the admirals"
+// part 2 dissolves: each builder fills only its own list (a seam dissolve into the next builder's range belongs to the builder it leaves)
+const XF_M = [{ a: 1024, b: 1028, from: 'Mp', to: 'M2' }, { a: 1108, b: 1112, from: 'Mq', to: 'M3' }, { a: 1150, b: 1157, from: 'M3', to: 'N0' }];   // [M] scope → U twice; the seam into N (repointed at merge)
+
+const XF_N = SN.XF;   // [N] out to P's sea, 1290–1297 (to: 'P0')
+
+const XF_P = [{ a: 1323, b: 1330, from: 'P0', to: 'Pe' }, { a: 1512, b: 1519, from: 'Ps', to: 'Pw' }, { a: 1574, b: 1581, from: 'Pw', to: 'Q0' }];   // [P]
+
+const XF_Q = [{ a: 1651, b: 1658, from: 'Q0', to: 'Q1' }];   // [Q] office → Paris on "But" (1655)
+
+XF.push(...XF_M, ...XF_N, ...XF_P, ...XF_Q);
+const FLASH = [];   // [K v18] no white flash: the old one (111–114) sat on the cut from shot 2 to shot 3, which is gone
+const flashAt = f => { for (const [a, v] of FLASH) if (f >= a && f < a + v.length) return v[Math.floor(f) - a]; return 0; };
+const byId = id => SH.find(s => s.id === id);
+// a fleet pop from nothing: grows in over ~4 frames with a small overshoot
+const popIn = (f, pf) => f < pf ? 0 : 1 - Math.exp(-(f - pf) * .8) * Math.cos((f - pf) * .9);
+// ---------- the time map (v18): shots 7–11 keep their old frames; new frames TM_A..TM_B play them through TM (new frame → old frame).
+// Knots [new, old] on the words both takes share ("walks" … "ships"); straight between knots, speed 1 outside them, and every
+// corner rounded by a parabola over ±w frames (C1: no speed jump inside a whip or a camera move; it moves a knot by ≤ .32 frame).
+// "ten" is not a knot: one→hundreds runs at one speed through the pull-back and the ten pop moved instead (TEN10).
+const TM_K = [[362, 460], [460, 551], [485, 575], [498, 586], [569, 654], [585, 671], [617, 701], [661, 739], [687, 767], [723, 805], [754, 835], [776, 856], [802, 878]];
+const TM_IDS = new Set(['7', 'T7i', '7i', 'W78', '8', 'W89', '9', 'T9', '9b', '10', '11']), TM_A = 344, TM_B = 822;
+const TM = (() => { const K = TM_K, n = K.length, S = [1, ...K.slice(1).map((k, i) => (k[1] - K[i][1]) / (k[0] - K[i][0])), 1];
+  const Wd = K.map((k, i) => { const d = Math.abs(S[i + 1] - S[i]); let w = 6; if (d > 1e-9) w = Math.min(w, 1.6 / d); if (i > 0) w = Math.min(w, .45 * (k[0] - K[i - 1][0])); if (i < n - 1) w = Math.min(w, .45 * (K[i + 1][0] - k[0])); return w; });
+  return f => { let y; if (f <= K[0][0]) y = K[0][1] + f - K[0][0]; else if (f >= K[n - 1][0]) y = K[n - 1][1] + f - K[n - 1][0]; else { let i = 0; while (K[i + 1][0] <= f) i++; y = K[i][1] + S[i + 1] * (f - K[i][0]); }
+    for (let i = 0; i < n; i++) { const x = K[i][0], w = Wd[i], d = S[i + 1] - S[i]; if (Math.abs(f - x) < w) y += d * (f - x + w) ** 2 / (4 * w) - d * Math.max(0, f - x); } return y; }; })();
+const TMI = o => { let lo = -500, hi = 1500; for (let i = 0; i < 50; i++) { const m = (lo + hi) / 2; if (TM(m) < o) lo = m; else hi = m; } return (lo + hi) / 2; };   // old → new
+for (const s of SH) if (TM_IDS.has(s.id)) s.tm = true;
+const inL = f => f >= TM_A && f <= TM_B;
+// the dissolves inside 344–822, in new frames (old 748–755 and 831–836)
+const XFL = [{ a: Math.round(TMI(748)), b: Math.round(TMI(755)), from: '9b', to: '10' }, { a: Math.round(TMI(831)), b: Math.round(TMI(836)), from: '10', to: '11' }];
+// inside 344–822: the mapped shots, by their old frames; outside: the others, by new frames
+const shotAt = f => (inL(f) ? SH.find(s => s.tm && Math.round(TM(f)) >= s.a && Math.round(TM(f)) <= s.b) : SH.find(s => !s.tm && f >= s.a && f <= s.b)) || SH[SH.length - 1];
+// a dissolve at new frame f: XFL inside 344–822; the global list elsewhere, and at the seams only the one into 7 (start) or out of 11 (end)
+const xfAt = f => XFL.find(x => f >= x.a && f <= x.b) || XF.find(x => f >= x.a && f <= x.b && !(TM_IDS.has(x.from) && TM_IDS.has(x.to)) && (!inL(f) || (x.to === '7' && f <= TM_A + 8) || (x.from === '11' && f >= TM_B - 8)));
+window.__TM = TM; window.__TMI = TMI;
+
+// ---------- post: depth blur, grade, vignette (ink-safe shadow lift); a mix pass for dissolves, sub-frame blur, the periscope mask and the white flash
+const RT = new THREE.WebGLRenderTarget(W, H, { samples: 4, depthTexture: new THREE.DepthTexture(W, H) });
+let IRISB = null;
+const FT = { type: THREE.FloatType }, OA = new THREE.WebGLRenderTarget(W, H), OB = new THREE.WebGLRenderTarget(W, H), AC = [new THREE.WebGLRenderTarget(W, H, FT), new THREE.WebGLRenderTarget(W, H, FT)], XA = new THREE.WebGLRenderTarget(W, H), XB = new THREE.WebGLRenderTarget(W, H);   // float accumulators: hundreds of sub-frames average without banding
+const PU = { tC: { value: RT.texture }, tD: { value: RT.depthTexture }, near: { value: cam.near }, far: { value: cam.far }, focus: { value: 5 }, maxR: { value: 6 }, px: { value: new THREE.Vector2(1 / W, 1 / H) }, gain: { value: 1 }, sat: { value: 1 }, con: { value: 1 }, vig: { value: .5 }, nearCap: { value: 99 }, warm: { value: 1 }, lift: { value: 1 }, toe: { value: 0 }, st: { value: 0 }, wc: { value: 0 }, vc: { value: 0 } };
+const VS = 'varying vec2 v;void main(){v=uv;gl_Position=vec4(position.xy,0.,1.);}';
+const post = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({ uniforms: PU, depthTest: false, vertexShader: VS, fragmentShader: `
+ varying vec2 v;uniform sampler2D tC,tD;uniform float near,far,focus,maxR,nearCap,gain,sat,con,vig,warm,lift,toe,st,wc,vc;uniform vec2 px;
+ float lin(float d){float z=d*2.-1.;return 2.*near*far/(far+near-z*(far-near));}
+ float coc(vec2 u){float z=lin(texture2D(tD,u).x);return min(clamp(abs(1./focus-1./z)*focus*1.6,0.,1.)*maxR,z<focus?nearCap:1e3);}   // nearCap: a shot may cap the blur in front of the focus
+ void main(){float c0=coc(v);vec3 c=vec3(0.);float n=0.;
+  for(int i=0;i<48;i++){float r=sqrt((float(i)+.5)/48.)*c0,a=float(i)*2.39996;vec2 u=v+vec2(cos(a),sin(a))*r*px;float w=coc(u)>=r*.6?1.:.12;c+=texture2D(tC,u).rgb*w;n+=w;}c/=n;
+  float card=1.-smoothstep(.6,.95,texture2D(tC,v).a);vec3 raw=pow(max(c,0.),vec3(1./2.2));   // card pixels (alpha .5) keep their drawn colours: no grade, no vignette
+  c=raw*gain;float l=dot(c,vec3(.2126,.7152,.0722));c=mix(vec3(l),c,sat);c=mix(c,(c-.5)*con+.5,smoothstep(.08,.24,l));   // contrast never pushes the ink below its own value
+  float l0=dot(c,vec3(.2126,.7152,.0722));c=mix(c,c*(1.-.075*lift)+vec3(.07,.062,.085)*lift,smoothstep(.12,.3,l0));      // lift the shadows, never the ink
+  c=mix(c,c*vec3(1.06,1.,.9),warm*smoothstep(.35,.9,l));c=mix(c,c*vec3(.9,.92,1.12)+vec3(.012,.008,.03),smoothstep(.45,.05,l));   // warm highlights, cool lifted shadows
+  c=max(c-toe*.1*(1.-smoothstep(.15,.45,dot(c,vec3(.2126,.7152,.0722)))),0.);   // toe: pull the darkest values down (p2 .08–.16)
+  float l1=dot(c,vec3(.2126,.7152,.0722));c+=st*(smoothstep(.4,.85,l1)*vec3(.05,.012,-.05)+(1.-smoothstep(.1,.5,l1))*vec3(-.03,0.,.05));   // split tone: warm highs, cool lows
+  if(wc>0.){float k=.765;c=mix(c,mix(c,k+.2*(1.-exp(-(c-k)/.2)),step(k,c)),wc);}   // white cap (amount 0..1, so it blends in travels): a soft shoulder, the brightest graded white lands at .965
+  float d=length((v-vec2(.5,.52+vc))*vec2(.85,1.));c=mix(c,c*vec3(.34,.3,.46),vig*smoothstep(.25,.85,d));
+  c=mix(c,min(raw,vec3(.972))+st*(1.-smoothstep(.08,.3,dot(raw,vec3(.2126,.7152,.0722))))*vec3(-.008,0.,.022),card);   // card whites untouched; only the ink leans cool with the split tone   // card whites stay under 250
+  gl_FragColor=vec4(clamp(c,0.,1.),1.);}` }));
+const PS = new THREE.Scene(), PC = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1); PS.add(post);
+const MU = { a: { value: OA.texture }, b: { value: OB.texture }, k: { value: 0 }, fl: { value: 0 }, pe: { value: 0 }, pc: { value: new THREE.Vector2(360, 1280 - 560) }, pr: { value: 300 }, lock: { value: 0 }, ping: { value: -1 }, iris: { value: 0 }, ko: { value: 0 } };
+const mixM = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.ShaderMaterial({ uniforms: MU, depthTest: false, vertexShader: VS, fragmentShader: `
+ varying vec2 v;uniform sampler2D a,b;uniform float k,fl,pe,pr,lock,ping,iris,ko;uniform vec2 pc;
+ void main(){vec3 cA=texture2D(a,v).rgb,cB=texture2D(b,v).rgb,c=iris>.5?cB:mix(cA,cB,k);
+  if(pe>.5){vec2 P=v*vec2(720.,1280.),d=P-pc;float r=length(d);vec3 ink=vec3(.11,.09,.13),outC=vec3(.19,.235,.31);
+   c=mix(c,c*vec3(.86,.98,.97),.8);c=mix(c,c*.6,smoothstep(pr*.55,pr,r)*.55);                      // lens tint, inner falloff
+   vec2 q=abs(d);float inside=step(r,pr-14.);
+   float cross=(step(q.x,1.6)*step(22.,q.y)+step(q.y,1.6)*step(22.,q.x))*inside;
+   float tick=(step(q.y,7.)*step(mod(q.x,40.),2.6)*step(30.,q.x)+step(q.x,7.)*step(mod(q.y,40.),2.6)*step(30.,q.y))*inside;
+   c=mix(c,ink,clamp(cross+tick,0.,1.));
+   if(lock>.5){vec3 red=vec3(.93,.33,.24);float br=(step(abs(q.x-74.),3.)*step(q.y,74.)*step(46.,q.y)+step(abs(q.y-74.),3.)*step(q.x,74.)*step(46.,q.x));
+    c=mix(c,red,br);c=mix(c,red,1.-smoothstep(5.,7.,r));
+    if(ping>=0.&&ping<1.){float rr=mix(20.,pr-20.,ping);c=mix(c,vec3(1.,.95,.86),step(abs(r-rr),3.5)*(1.-ping));}}
+   vec3 o=iris>.5?mix(cA,outC,ko):outC;   // during the iris, outside the circle: the map, darkening into the scope
+   c=mix(c,ink,smoothstep(pr-18.,pr-4.,r));c=mix(c,o,smoothstep(pr-1.,pr+2.,r));}
+  gl_FragColor=vec4(mix(c,vec3(1.,.985,.95),fl),1.);}` }));
+const MS = new THREE.Scene(); MS.add(mixM);
+
+// ---------- per-frame set-up from the shot table
+const v3 = a => new THREE.Vector3(...a);
+const PLACES = { H: HB.group, O: OF.group, S: SEA.group, D: DK.group, F: HF.group };
+const DUM = new THREE.PerspectiveCamera(), YAX = new THREE.Vector3(0, 1, 0);
+// a shot's camera at frame f: position, orientation, fov, lens shift (kick and creep included)
+function camState(s, f) {
+  if (s.travel && !s.cam) return travelCam(s, f);   // a travel with its own camera keys (T24) moves on them
+  const k = typeof s.cam === 'function' ? s.cam(f) : camKey(s, f);
+  if (s.kick != null && f >= s.kick && f < s.kick + 7) {   // the "pop" shake: ~3 px, flipping sign every frame, decaying over 8 frames
+    const t = Math.round(f) - s.kick, amp = (s.kickAmp ?? 1.4) * (1 - t / 7), sg = t % 2 ? -1 : 1; k[9] += amp * sg; k[8] -= .7 * amp * sg; }
+  { const cr = s.creep ?? .0014, n = Math.max(0, f - (s.creepFrom ?? s.a)); k[7] = 2 * Math.atan(Math.tan(k[7] * Math.PI / 360) * Math.pow(1 - cr, n)) * 180 / Math.PI; }   // every hold creeps in (.14 %/f)
+  DUM.up.set(...(s.up ? s.up(f) : [0, 1, 0])).normalize(); DUM.position.set(k[1], k[2], k[3]); DUM.lookAt(k[4], k[5], k[6]);
+  return { p: DUM.position.clone(), q: DUM.quaternion.clone(), fov: k[7], sy: k[8], sx: k[9] };
+}
+// travels: the camera moves physically from shot A (still running) into shot B. t runs 0 at frame a-1 to 1 at b+1, smootherstep;
+// position straight, orientation slerped (plus an optional yaw swing for whips), fov in tan space, everything else blended.
+const tw = (s, f) => sst(clamp01((f - s.a + 1) / (s.b - s.a + 2)));
+const trAt = (s, r, f) => { const u = sst(clamp01((f - s.a + 1) / (s.b - s.a + 2))); return Math.abs(r - 1) < 1e-3 ? u : (Math.pow(r, u) - 1) / (r - 1); };
+function travelCam(s, f) {
+  const A = camState(byId(s.A), f), B = camState(byId(s.B), f), t = tw(s, f);
+  const ta = Math.tan(A.fov * Math.PI / 360), tb = Math.tan(B.fov * Math.PI / 360), r = tb / ta;
+  // the turn is paced by the current fov (slow where the lens is long), so the picture moves in one smootherstep hump
+  const u = sst(clamp01((f - s.a + 1) / (s.b - s.a + 2))), tr = Math.abs(r - 1) < 1e-3 ? u : (Math.pow(r, u) - 1) / (r - 1);
+  const p = A.p.clone().lerp(B.p, s.posEnd ? Math.min(1, tr / trAt(s, r, s.posEnd)) : s.paced ? tr : t), q = A.q.clone().slerp(B.q, tr);   // paced: the move rides the turn, so the picture moves along one axis
+  if (s.bulge) p.addScaledVector(v3(s.bulge), Math.sin(Math.PI * t));
+  // aim: through the middle of the glide the camera keeps a moving subject framed (look-at), easing back to A and B at the ends
+  if (s.aim) { const qa = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().lookAt(p, s.aim(f, p), new THREE.Vector3(0, 1, 0))); q.slerp(qa, s.aimFull ? 1 : t < .5 ? Math.min(1, 2 * Math.sin(Math.PI * t)) : 1); }   // B's look must be the aim's end point
+  if (s.yaw) q.premultiply(new THREE.Quaternion().setFromAxisAngle(YAX, s.yaw * Math.PI / 180 * Math.sin(Math.PI * t)));
+  return { p, q, fov: 2 * Math.atan(ta * Math.pow(tb / ta, t)) * 180 / Math.PI, sy: window.__syS ? window.__syS(f) : A.sy + (B.sy - A.sy) * (window.__syw ? window.__syw(f) : s.syW ? s.syW(f) : t) + (s.syAdd ? s.syAdd(f) : 0), sx: A.sx + (B.sx - A.sx) * t };
+}
+// a shot's look at frame f: light set, fog, ink, focus, grade, shadow (evaluated after staging: focus may measure to a card)
+function look(s, f) {
+  const fg = s.fog, gr = s.grade, gv = v => typeof v === 'function' ? v(f) : Array.isArray(v) ? v.reduce((o, [k, x]) => Math.round(f) >= k ? x : o, v[0][1]) : v;   // a grade value is a number or a step table [[frame, value]]
+  const [sc, sz] = s.shadow;
+  return { L: LIGHT[s.light], fog: [kf(fg.map(x => [x[0], x[1]]), f), kf(fg.map(x => [x[0], x[2]]), f), kf(fg.map(x => [x[0], x[3]]), f)], ink: s.ink,
+    focus: typeof s.focus === 'function' ? s.focus(f) : s.focus, blur: typeof s.blur === "function" ? s.blur(f) : s.blur, gr: ['gain', 'sat', 'con', 'vig', 'warm', 'lift', 'toe', 'st', 'wc', 'vc'].map(k => gv(gr[k] ?? (k === 'toe' || k === 'st' || k === 'wc' || k === 'vc' ? 0 : 1))), inkFog: s.inkFog ?? .62, nearCap: s.nearCap ?? 99,
+    sc: typeof sc === 'function' ? sc(f) : v3(sc), sz };
+}
+const lerpAny = (a, b, t) => a?.isColor ? a.clone().lerp(b, t) : a?.isVector3 ? a.clone().lerp(b, t) : Array.isArray(a) ? a.map((x, i) => lerpAny(x, b[i], t)) : typeof a === 'number' ? a + (b - a) * t
+  : a && typeof a === 'object' ? Object.fromEntries(Object.keys(a).map(k => [k, lerpAny(a[k], b[k], t)])) : a;
+function setup(f, s) {
+  if (s.tm) f = TM(f);   // shots 7–11 run on their old frames
+  const fs = SF ?? f;   // r18: a frozen staging frame (SF) inside one blurred frame: only the camera moves across the shutter
+  hide(); const A = s.travel && byId(s.A), B = s.travel && byId(s.B), pl = s.travel ? [...A.places, ...B.places] : s.places;
+  for (const k in PLACES) PLACES[k].visible = pl.includes(k);
+  const c = camState(s, f);
+  cam.position.copy(c.p); cam.quaternion.copy(c.q); cam.fov = c.fov; cam.setViewOffset(W, H, -c.sx, c.sy, W, H); cam.updateProjectionMatrix(); cam.updateMatrixWorld(true);
+  sky.mesh.position.copy(cam.position);
+  if (s.travel) { if (s.stage) s.stage(f); else { A.stage(f); B.stage(f); } } else s.stage(fs);
+  for (const c of CARDS) if (c.root.visible) c.paint(s.pf ? s.pf(fs, c) : fs);   // pf: a shot's frame for its cards' poses (K's shots replay old acting)
+  const lk = s.travel ? lerpAny(look(A, f), look(B, f), tw(s, f)) : look(s, f), L = lk.L;
+  if (s.gainK) lk.gr[0] *= kl(s.gainK, f); if (s.vigMul) lk.gr[3] *= s.vigMul(f);   // a measured gain table: the travel's mean luma runs one smooth line
+  if (s.gainAt) for (const [fc, w, k] of s.gainAt) lk.gr[0] *= 1 + k * Math.exp(-(((f - fc) / w) ** 2));   // lift a dark pass in a travel (the floor between wall and map) so the luma runs one way
+  // light and fog
+  sky.u.cH.value.copy(L.skyH); sky.u.cZ.value.copy(L.skyZ); sky.u.cG.value.copy(L.glow); sky.u.gK.value = L.glowK; sky.u.gDir.value.set(...L.glowDir).normalize(); if (s.skyMul) { const m = s.skyMul(f); sky.u.cH.value.multiplyScalar(m); sky.u.cZ.value.multiplyScalar(m); sky.u.cG.value.multiplyScalar(m); }
+  amb.color.copy(L.hemiSky); amb.groundColor.copy(L.hemiGnd); amb.intensity = L.hemi * Math.PI; if (s.fill) amb.intensity *= s.fill(f); key.color.copy(L.key); key.intensity = L.keyI * Math.PI;
+  OF.lamps.forEach(l => l.intensity = L.lamp); if (s.lightMul) { const m = s.lightMul(f); key.intensity *= m; amb.intensity *= m; }
+  const sz = lk.sz; key.target.position.copy(lk.sc); key.position.copy(lk.sc).add(v3(L.keyDir).normalize().multiplyScalar(Math.max(40, sz * 2)));
+  Object.assign(key.shadow.camera, { left: -sz, right: sz, top: sz, bottom: -sz, near: 1, far: Math.max(120, sz * 5) }); key.shadow.camera.updateProjectionMatrix();
+  const [near, far, card] = lk.fog; S.fog.color.copy(L.skyH); S.fog.near = near; S.fog.far = far;
+  if (HB.group.visible) HB.update(f, cam, L.skyH, card);
+  if (SEA.group.visible) SEA.update(f);
+  INK_SCALE.value = lk.ink;
+  PU.focus.value = lk.focus; PU.maxR.value = lk.blur; PU.nearCap.value = lk.nearCap;
+  [PU.gain.value, PU.sat.value, PU.con.value, PU.vig.value, PU.warm.value, PU.lift.value, PU.toe.value, PU.st.value, PU.wc.value, PU.vc.value] = lk.gr; INK_FOG.value = lk.inkFog;
+}
+function draw(f, s, target) { setup(f, s); R.setRenderTarget(RT); R.render(S, cam); R.setRenderTarget(target); R.render(PS, PC); }
+// the last pass: periscope mask (per shot) and the white flash
+// the periscope matte into a target (used when the scope view dissolves away)
+function scope(tex, f, s, target) { MU.a.value = tex; MU.k.value = 0; MU.fl.value = 0; MU.pe.value = 1; [MU.lock.value, MU.ping.value] = s.lock ? s.lock(f) : [0, -1];
+  R.setRenderTarget(target); R.render(MS, PC); MU.pe.value = 0; MU.lock.value = 0; }
+function final(texA, f, s) { MU.a.value = texA; MU.k.value = 0; MU.fl.value = flashAt(f);
+  MU.pe.value = s.peri || s.iris ? 1 : 0; [MU.lock.value, MU.ping.value] = s.peri && s.lock ? s.lock(f) : [0, -1];   // a scope shot's lock: [on, ping phase]
+  // the iris: the scope circle opens out of the push (full at f384, "grey"), the map outside it sinks into the scope's dark
+  if (s.peri && s.pr) MU.pr.value = s.pr;   // [K r15] a scope shot may set its own radius
+  if (s.iris) { MU.b.value = IRISB; MU.iris.value = 1; MU.pr.value = 14 + ((byId(s.B).pr ?? 300) - 14) * sst(clamp01((f - s.a + 1) / (s.full - s.a + 1))); MU.ko.value = sst(clamp01((f - s.a + 1) / (s.koN ?? 9))); }   // the map is gone into the dark by 382
+  if (s.iris && s.irisK) { const k = s.irisK(f); if (k.pr != null) MU.pr.value = k.pr; if (k.ko != null) MU.ko.value = k.ko; if (k.pc) MU.pc.value.set(k.pc[0], H - k.pc[1]); }   // [P] an iris shot may drive its circle (px from the top) and the dark outside it per frame
+  R.setRenderTarget(null); R.render(MS, PC); MU.fl.value = 0; MU.pe.value = 0; MU.iris.value = 0; MU.pr.value = 300; MU.pc.value.set(360, 1280 - 560); }
+// how many sub-frames a whip frame needs so neighbouring samples land ~1.5 px apart at the frame's speed
+function whipN(s, f, sh) { const m = s.tm ? TM : (x => x), a = camState(s, m(f - sh / 2)), b = camState(s, m(f + sh / 2)), fov = Math.min(a.fov, b.fov);
+  const pxr = (H / 2) / Math.tan(fov * Math.PI / 360), ang = 2 * Math.acos(Math.min(1, Math.abs(a.q.dot(b.q))));
+  const px = (ang + a.p.distanceTo(b.p) / (s.depth ?? 6)) * pxr + Math.abs(Math.log(Math.tan(a.fov * Math.PI / 360) / Math.tan(b.fov * Math.PI / 360))) * 700 + Math.abs(a.sy - b.sy) + Math.abs(a.sx - b.sx);
+  return Math.max(8, Math.min(s.wmax ?? q('wmax', 1200), Math.ceil(px * (s.wmul ?? 1) / q('wdiv', 1.5)))); }   // ~.3 px at the reference depth: near objects (painter close-ups) stay under 1.5 px
+// sub-frame motion blur: n renders spread over a shutter of sh frames, averaged
+// r18: SF, when set, freezes a shot's staging and card poses at one frame for every sub-frame (stage functions that round f gave two copies of a card)
+let SF = null;
+function blurFrame(f, s, n, sh = .7) { for (let i = 0; i < n; i++) { draw(f - sh / 2 + sh * (i + .5) / n, s, OB); MU.a.value = AC[i % 2].texture; MU.b.value = OB.texture; MU.k.value = 1 / (i + 1); R.setRenderTarget(AC[(i + 1) % 2]); R.render(MS, PC); } return AC[n % 2].texture; }
+// dissolve: shot sA into shot sB over frames a..b (smoothstep)
+function dissolve(f, sA, sB, a, b) { draw(f, sA, OA); if (sA.peri) { scope(OA.texture, f, sA, XB); R.setRenderTarget(OA); MU.a.value = XB.texture; MU.k.value = 0; R.render(MS, PC); } draw(f, sB, OB); MU.a.value = OA.texture; MU.b.value = OB.texture; MU.k.value = sst(clamp01((f - a) / (b - a))); R.setRenderTarget(XA); R.render(MS, PC); return XA.texture; }
+window.__dissolve = dissolve;
+window.__cpx = (f, D) => { const s = shotAt(f); setup(f, s); const c = cam.clone(), d = new THREE.Vector3(0, 0, -1).applyQuaternion(c.quaternion), P = c.position.clone().addScaledVector(d, D); setup(f + 1, shotAt(f + 1)); const a = P.clone().project(c), b = P.clone().project(cam); return [Math.round((b.x - a.x) * 360), Math.round((a.y - b.y) * 640)]; };
+window.__whipN = (f, id) => { const s = id ? byId(id) : shotAt(f); return s.mblur ? whipN(s, f, s.mblur[1]) : 0; };
+window.__byId = id => byId(id); window.__fn = { walkPos, ss, tw, sst, clamp01, trAt }; window.__setup = (f, id) => setup(f, byId(id));   // debug: set the rig to one shot at frame f
+// debug: screen position (px) of a world point, and handles to the rig
+window.__px = v => { const p = (v.isVector3 ? v.clone() : new THREE.Vector3(...v)).project(cam); return [Math.round((p.x + 1) / 2 * W), Math.round((1 - p.y) / 2 * H), +p.z.toFixed(3)]; };
+window.__rig = { OF, SEA, HB, HAND, ADM, CHA, CHB, PAINTER, T, O, SL, DL, FL, DK, HF, BOAT, ARROW, FAC, TEA, DOOR, hero, cam, THREE };
+window.__cam = () => ({ fov: +cam.fov.toFixed(3), pos: cam.position.toArray().map(v => +v.toFixed(3)), view: cam.view && [cam.view.offsetX, cam.view.offsetY] });
+
+window.__paint = (f) => {
+  f = Math.max(0, Math.min(NF - 1, Math.round(f))); const only = Q.get('shot'), s = only ? byId(only) : shotAt(f);
+  const x = only ? null : xfAt(f);
+  let out;
+  if (x) out = dissolve(f, byId(x.from), byId(x.to), x.a - 1, x.b + 1);
+  else if (s.iris) { draw(f, byId(s.A), OA); const [tx, ty] = s.irisC ? s.irisC(f) : window.__px(OF.tokens[6].getWorldPosition(new THREE.Vector3())); { const w = sst(clamp01((f - s.a) / 10)); MU.pc.value.set(tx + (360 - tx) * w, H - ty + (720 - (H - ty)) * w); } { const sB = byId(s.B); IRISB = sB.mblur ? blurFrame(f, sB, whipN(sB, f, sB.mblur[1]), sB.mblur[1]) : (draw(f, sB, OB), OB.texture); } out = OA.texture; }   // the circle opens on the sub token
+  else if (!q('noblur', 0) && s.mblur) { const fz0 = s.freezeAt && s.freezeAt(s.tm ? TM(f) : f); if (fz0) SF = Math.round(s.tm ? TM(f) : f);
+    out = blurFrame(f, s, Math.max(fz0 ? 16 : 0, s.mblur[0] || whipN(s, f, s.mblur[1])), s.mblur[1]); SF = null; }   // whips: strong directional blur from the move itself
+  else if (!q('noblur', 0) && s.blurFrames && f >= s.blurFrames[0] && f <= s.blurFrames[1]) out = blurFrame(f, s, 8, .7);   // never on a reveal frame
+  else { draw(f, s, OA); out = OA.texture; }
+  final(out, f, x ? {} : s);   // a dissolve carries its own scope matte
+  caption(f);
+};
+
+// ---------- captions (P27): one word group at a time from vo/zebra-v2.words.json (this cut: up to "sights.", the words that start before NF - 8); groups of 1–3 words, broken at punctuation,
+// each shown from its first word's onset (groups of 1–2 words: a new group every 4–20 f). Montserrat 800 45 px, white over a 10 px black stroke drawn behind, small drop shadow, centre x 360, baseline 917.
+const WORDS = (await (await fetch('vo/zebra-v2.words.json')).json()).filter(w => w.start_sec * 30 < NF - 8);
+const CAP = (() => { const groups = [], phrase = []; const flush = () => { const n = phrase.length; if (!n) return; const k = Math.ceil(n / 2), base = Math.floor(n / k); let r = n % k, i = 0;
+    for (let g = 0; g < k; g++) { const m = base + (r-- > 0 ? 1 : 0); groups.push(phrase.slice(i, i + m)); i += m; } phrase.length = 0; };
+  for (const w of WORDS) { phrase.push(w); if (/[,.;:?!]$/.test(w.word)) flush(); } flush();
+  for (let i = 0; i < groups.length; i++) { const g = groups[i], nx = groups[i + 1], span = (nx ? nx[0].start_sec : 99) * 30 - g[0].start_sec * 30;
+    if (g.length > 1 && span > 20) { groups.splice(i, 1, ...g.map(w => [w])); i += g.length - 1; } }   // a group that would run over 20 f goes word by word
+  return groups.map((g, i) => ({ a: Math.round(g[0].start_sec * 30), end: Math.round(g[g.length - 1].end_sec * 30) + 12, text: g.map(w => w.word).join(' ').replace(/[,.;:]$/, '') }))
+    .map((c, i, A) => ({ ...c, b: c.text === '1917' || (i + 1 < A.length && A[i + 1].a - 1 - Math.min(c.end, c.a + 20) <= 5) ? A[i + 1].a - 1 : Math.min(i + 1 < A.length ? A[i + 1].a - 1 : NF - 1, c.end, c.a + 20) })); })();   // '1917' stays up to the next word ("and", 167)   // no group stays up over 20 f   // held until the next group (gaps under 6 frames never blank: r15), or 12 frames past its last word in a pause
+window.__captions = CAP;
+const CV = document.createElement('canvas'); CV.width = W; CV.height = H; CV.style.cssText = 'position:absolute;left:0;top:0;pointer-events:none'; document.body.appendChild(CV); const CG = CV.getContext('2d');
+function caption(f) { CG.clearRect(0, 0, W, H); if (q('nocap', 0)) return; const c = CAP.find(c => f >= c.a && f <= c.b); if (!c) return;
+  CG.font = '800 45px Montserrat'; CG.textAlign = 'center'; CG.lineJoin = 'round'; const x = 360, y = 917;
+  CG.shadowColor = 'rgba(0,0,0,.55)'; CG.shadowOffsetX = 2; CG.shadowOffsetY = 3; CG.shadowBlur = 3; CG.lineWidth = 10; CG.strokeStyle = '#0a0a0c'; CG.strokeText(c.text, x, y);
+  CG.shadowColor = 'transparent'; CG.fillStyle = '#fdfdfd'; CG.fillText(c.text, x, y); }
+await document.fonts.load('800 45px Montserrat');
+window.__paint(q('f', 0)); window.__ready = true;
+</script></body></html>
